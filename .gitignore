@@ -6,4 +6,4 @@ bot.log
 1.env
 *.session
 .venv
-
+*.db
