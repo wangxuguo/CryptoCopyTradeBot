@@ -616,6 +616,24 @@ class ExchangeClient(ABC):
             logging.error(f"Error getting order: {e}")
             return None
 
+    async def get_open_orders(self, symbol: Optional[str] = None) -> List[OrderInfo]:
+        try:
+            self._rate_limit()
+            norm = self._normalize_symbol(symbol) if symbol else None
+            orders = await asyncio.to_thread(
+                self._exchange.fetchOpenOrders,
+                norm
+            )
+            result: List[OrderInfo] = []
+            for o in orders or []:
+                info = OrderInfo.from_exchange_order(o)
+                if info:
+                    result.append(info)
+            return result
+        except Exception as e:
+            logging.error(f"Error getting open orders: {e}")
+            return []
+
     async def get_funding_rate(self, symbol: str) -> Optional[float]:
         """Get funding rate"""
         try:
@@ -689,17 +707,33 @@ class ExchangeClient(ABC):
             actual_leverage = min(leverage, max_leverage)
             
             norm = self._normalize_symbol(symbol)
-            await asyncio.to_thread(
-                self._exchange.setMarginMode,
-                margin_mode,
-                norm
-            )
+            if getattr(self, 'exchange_name', '') == 'OKX':
+                await asyncio.to_thread(
+                    self._exchange.setMarginMode,
+                    margin_mode,
+                    norm,
+                    {'lever': actual_leverage}
+                )
+            else:
+                await asyncio.to_thread(
+                    self._exchange.setMarginMode,
+                    margin_mode,
+                    norm
+                )
             
-            await asyncio.to_thread(
-                self._exchange.setLeverage,
-                actual_leverage,
-                norm
-            )
+            if getattr(self, 'exchange_name', '') == 'OKX':
+                await asyncio.to_thread(
+                    self._exchange.setLeverage,
+                    actual_leverage,
+                    norm,
+                    {'mgnMode': margin_mode}
+                )
+            else:
+                await asyncio.to_thread(
+                    self._exchange.setLeverage,
+                    actual_leverage,
+                    norm
+                )
             
             logging.info(f"Set {margin_mode} leverage for {symbol}: requested={leverage}, actual={actual_leverage}")
             return actual_leverage
@@ -1319,6 +1353,19 @@ USDT Amount: {zone_amount}
             
         except Exception as e:
             logging.error(f"Error getting positions: {e}")
+            return {}
+
+    async def get_open_orders(self, exchange: Optional[str] = None) -> Dict[str, List[OrderInfo]]:
+        try:
+            result: Dict[str, List[OrderInfo]] = {}
+            exchanges = [self.exchanges[exchange]] if exchange else self.exchanges.values()
+            for ex in exchanges:
+                orders = await ex.get_open_orders()
+                if orders:
+                    result[ex.exchange_name] = orders
+            return result
+        except Exception as e:
+            logging.error(f"Error getting open orders: {e}")
             return {}
 
     async def get_balances(self) -> Dict[str, AccountBalance]:

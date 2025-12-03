@@ -13,6 +13,7 @@ from models import (
     EntryZone, 
     TakeProfitLevel
 )
+from typing import Dict, List
 
 
 
@@ -348,15 +349,47 @@ class MessageProcessor:
             if not channel_info or not channel_info['is_active'] or channel_info['channel_type']!='MONITOR':
                 return None
 
-            # 预处理消息
             cleaned_message = self.preprocess_message(channel_message.text)
+
+            context_append = ""
+            try:
+                exm = getattr(self.trading_logic, 'exchange_manager', None)
+                if exm:
+                    positions_by_ex = await exm.get_positions()
+                    orders_by_ex = await exm.get_open_orders()
+                    if positions_by_ex:
+                        lines: List[str] = []
+                        for ex_name, positions in positions_by_ex.items():
+                            lines.append(f"{ex_name}:")
+                            for pos in positions:
+                                side = '做多' if getattr(pos, 'size', 0) > 0 or getattr(pos, 'side', '').upper() == 'LONG' else '做空'
+                                lines.append(
+                                    f"{getattr(pos, 'symbol', '')} {side} 量: {abs(getattr(pos, 'size', 0))} 入场: {getattr(pos, 'entry_price', 0):.6f} 未盈亏: {getattr(pos, 'unrealized_pnl', 0):.2f}"
+                                )
+                        if lines:
+                            context_append += "\n\n当前持仓:\n" + "\n".join(lines)
+                    if orders_by_ex:
+                        lines: List[str] = []
+                        for ex_name, orders in orders_by_ex.items():
+                            lines.append(f"{ex_name}:")
+                            for od in orders:
+                                lines.append(
+                                    f"{getattr(od, 'symbol', '')} {getattr(od, 'side', '')} {getattr(od, 'type', '')} 量: {getattr(od, 'amount', 0)} 价: {getattr(od, 'price', 0) if getattr(od, 'price', None) is not None else ''} 状态: {getattr(od, 'status', '')}"
+                                )
+                        if lines:
+                            context_append += "\n\n当前委托:\n" + "\n".join(lines)
+            except Exception as e:
+                logging.error(f"Error building context: {e}")
+
+            if context_append:
+                cleaned_message = cleaned_message + context_append
             
             # 使用自定义prompt或默认prompt
             custom_prompt = channel_info.get('prompt')
                 
             # 尝试解析信号
             trading_signal = self.trading_logic.process_message(
-                cleaned_message, 
+                cleaned_message,
                 custom_prompt
             )
         

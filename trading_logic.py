@@ -11,14 +11,20 @@ import numpy as np
 import pandas as pd
 
 from models import TradingSignal, EntryZone, TakeProfitLevel
+from typing import Optional
+try:
+    from exchange_execution import ExchangeManager
+except Exception:
+    ExchangeManager = None
 
 class TradingLogic:
-    def __init__(self, openai_key: str, openai_base_url: str):
+    def __init__(self, openai_key: str, openai_base_url: str, exchange_manager: Optional[object] = None):
         # 初始化 OpenAI 客户端，优先在构造函数中设置 base_url
         if openai_base_url:
             self.openai_client = OpenAI(api_key=openai_key, base_url=openai_base_url)
         else:
             self.openai_client = OpenAI(api_key=openai_key)
+        self.exchange_manager = exchange_manager
         self.default_prompt = """
 你是一个交易信号分析器。请分析输入的消息并提取交易信号信息。
 如果找到有效的交易信号，请返回包含以下字段的JSON：
@@ -326,7 +332,82 @@ class TradingLogic:
             prompt = custom_prompt if custom_prompt else self.default_prompt
             
             logging.info(f"Original message:\n{'-'*40}\n{message}\n{'-'*40}")
+            cleaned_message = self._preprocess_message(message)
+
+            # 如需追加当前持仓或委托，请在调用方传入扩展文本再拼接
+            open_orders = self.exchange_manager.get_open_orders()
+            if open_orders:
+                cleaned_message += f"\n\n【当前持仓/委托】\n{open_orders}"
+            logging.info(f"Using prompt:\n{'-'*40}\n{prompt}\n{'-'*40}")
             
+            response = self.openai_client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": cleaned_message}
+                ],
+                temperature=0.7,
+                max_tokens=1024
+            )
+
+            response_text = None
+            try:
+                response_text = response.choices[0].message.content  # OpenAI v1 style
+                logging.info(f"LLM raw response type: {type(response)}")
+
+                response_text = self._extract_response_text(response)
+
+                if not isinstance(response_text, str) or not response_text.strip():
+                                    logging.error("无法从 LLM 响应中提取文本内容")
+
+                return None
+            except Exception:
+                if isinstance(response, str):
+                    response_text = response
+                elif isinstance(response, dict):
+                    try:
+                        choices = response.get("choices", [])
+                        if choices:
+                            msg = choices[0].get("message", {})
+                            response_text = msg.get("content") or response.get("content")
+                    except Exception:
+                        pass
+                if not response_text:
+                    try:
+                        response_text = str(response)
+                    except Exception:
+                        response_text = ""
+            logging.info(f"GPT response:\n{'-'*40}\n{response_text}\n{'-'*40}")
+            
+            signal_dict = self._parse_response(response_text)
+            if signal_dict:
+                logging.info(f"Parsed signal dictionary:\n{'-'*40}\n{json.dumps(signal_dict, indent=2)}\n{'-'*40}")
+                
+                if self._validate_json_data(signal_dict):
+                    normalized_dict = self._normalize_numbers(signal_dict)
+                    signal = self._convert_to_trading_signal(normalized_dict)
+                    
+                    if signal and signal.is_valid():
+                        risk_ratio_valid = True#self._validate_risk_ratio(signal)
+                        logging.info(f"Risk ratio validation: {risk_ratio_valid}")
+                        if risk_ratio_valid:
+                            return signal
+                        else:
+                            logging.error("Risk ratio validation failed")
+                    else:
+                        logging.error("Signal validation failed")
+                else:
+                    logging.error("JSON data validation failed")
+            else:
+                logging.error("Failed to parse GPT response")
+
+            return None
+            
+        except Exception as e:
+            logging.error(f"Error processing message: {e}")
+            import traceback
+            logging.error(f"Traceback:\n{traceback.format_exc()}")
+            return None
             cleaned_message = self._preprocess_message(message)
            
             logging.info(f"Using prompt:\n{'-'*40}\n{prompt}\n{'-'*40}")
