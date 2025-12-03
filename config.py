@@ -5,6 +5,10 @@ from typing import Any, Dict, Optional
 import os
 from datetime import datetime
 
+from dotenv import load_dotenv
+
+# Ensure .env is loaded so os.getenv works for local runs
+load_dotenv()
 @dataclass
 class ProxyConfig:
     """代理配置"""

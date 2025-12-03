@@ -417,6 +417,25 @@ class ExchangeClient(ABC):
             time.sleep(self.min_request_interval - time_since_last)
         self._last_request_time = time.time()
 
+    def _normalize_symbol(self, symbol: str) -> str:
+        s = (symbol or "").upper().strip()
+        if not s:
+            return s
+        if "/" in s and ":USDT" in s:
+            return s
+        if "/" in s:
+            base, quote = s.split("/")[0], s.split("/")[1]
+        elif "-" in s:
+            parts = s.split("-")
+            base = parts[0]
+            quote = parts[1] if len(parts) > 1 else "USDT"
+        else:
+            base = s.replace("USDT", "")
+            quote = "USDT"
+        if getattr(self, "exchange_name", "") == "OKX":
+            return f"{base}/{quote}:USDT"
+        return f"{base}/{quote}"
+
     @abstractmethod
     async def _setup_exchange(self) -> bool:
         """Setup exchange connection"""
@@ -460,9 +479,10 @@ class ExchangeClient(ABC):
         """Fetch positions"""
         try:
             self._rate_limit()
+            norm = self._normalize_symbol(symbol) if symbol else None
             positions = await asyncio.to_thread(
                 self._exchange.fetchPositions,
-                [symbol] if symbol else None
+                [norm] if norm else None
             )
             
             result = []
@@ -490,18 +510,19 @@ class ExchangeClient(ABC):
         """Get market information"""
         try:
             now = time.time()
-            if symbol in self._market_cache:
-                if now - self._market_cache_time.get(symbol, 0) < self.CACHE_DURATION:
-                    return self._market_cache[symbol]
-                    
+            norm = self._normalize_symbol(symbol)
+            if norm in self._market_cache:
+                if now - self._market_cache_time.get(norm, 0) < self.CACHE_DURATION:
+                    return self._market_cache[norm]
+            
             self._rate_limit()
-            market = await asyncio.to_thread(self._exchange.market, symbol)
-            ticker = await asyncio.to_thread(self._exchange.fetchTicker, symbol)
+            market = await asyncio.to_thread(self._exchange.market, norm)
+            ticker = await asyncio.to_thread(self._exchange.fetchTicker, norm)
             
             market_info = MarketInfo.from_exchange_market(market, ticker)
             if market_info:
-                self._market_cache[symbol] = market_info
-                self._market_cache_time[symbol] = now
+                self._market_cache[norm] = market_info
+                self._market_cache_time[norm] = now
             return market_info
             
         except Exception as e:
@@ -662,25 +683,22 @@ class ExchangeClient(ABC):
     async def set_leverage(self, symbol: str, leverage: int, margin_mode: str) -> bool:
         """Set leverage with validation"""
         try:
-            # Get max allowed leverage
-            leverage_info = await self.get_market_leverage_info(symbol)
+            leverage_info = await self.get_market_leverage_info(self._normalize_symbol(symbol))
             max_leverage = leverage_info['max_leverage']
             
-            # Adjust leverage if it exceeds maximum
             actual_leverage = min(leverage, max_leverage)
             
-            # Set margin mode first
+            norm = self._normalize_symbol(symbol)
             await asyncio.to_thread(
                 self._exchange.setMarginMode,
                 margin_mode,
-                symbol
+                norm
             )
             
-            # Then set leverage
             await asyncio.to_thread(
                 self._exchange.setLeverage,
                 actual_leverage,
-                symbol
+                norm
             )
             
             logging.info(f"Set {margin_mode} leverage for {symbol}: requested={leverage}, actual={actual_leverage}")
@@ -704,7 +722,7 @@ class ExchangeClient(ABC):
                 raise ValueError(f"Cannot get market info for {symbol}")
 
             # Get max allowed leverage and adjust if needed
-            leverage_info = await self.get_market_leverage_info(symbol)
+            leverage_info = await self.get_market_leverage_info(self._normalize_symbol(symbol))
             actual_leverage = min(leverage, leverage_info['max_leverage'])
             
             # Calculate quantity with leverage
@@ -713,7 +731,7 @@ class ExchangeClient(ABC):
             quantity = notional_value / price  # 可买币数
 
             # 应用精度要求
-            formatted_quantity = self._format_amount(symbol, quantity)
+            formatted_quantity = self._format_amount(self._normalize_symbol(symbol), quantity)
             
             # 实际使用的保证金
             actual_value = (formatted_quantity * price) / actual_leverage  
@@ -750,8 +768,8 @@ class ExchangeClient(ABC):
             if not order.validate():
                 raise OrderException("Invalid order parameters")
                 
-            # Get market info and current price
-            market_info = await self.get_market_info(order.symbol)
+            ccxt_symbol = self._normalize_symbol(order.symbol)
+            market_info = await self.get_market_info(ccxt_symbol)
             if not market_info or not market_info.last_price:
                 raise ValueError(f"Cannot get market info for {order.symbol}")
 
@@ -760,11 +778,10 @@ class ExchangeClient(ABC):
             
             # 设置杠杆和保证金模式
             leverage = order.leverage or 50  # 默认50倍杠杆
-            actual_leverage = await self.set_leverage(order.symbol, leverage, order.margin_mode)
+            actual_leverage = await self.set_leverage(ccxt_symbol, leverage, order.margin_mode)
             
-            # 转换USDT金额到币数量
             quantity, conversion_info = await self.convert_amount_to_contracts(
-                order.symbol,
+                ccxt_symbol,
                 order.amount,  # USDT amount
                 use_price,
                 actual_leverage  # 使用实际设置的杠杆
@@ -772,7 +789,7 @@ class ExchangeClient(ABC):
 
             # 创建订单参数
             params = {
-                'symbol': order.symbol,
+                'symbol': ccxt_symbol,
                 'type': order.order_type.lower(),
                 'side': order.side.lower(),
                 'amount': quantity,  # 币的数量(已包含杠杆)
@@ -781,10 +798,10 @@ class ExchangeClient(ABC):
             if order.order_type == OrderType.LIMIT:
                 if not order.price:
                     raise OrderException("Price is required for limit orders")
-                params['price'] = self._format_price(order.symbol, order.price)
+                params['price'] = self._format_price(ccxt_symbol, order.price)
 
             if order.stop_price:
-                params['stopPrice'] = self._format_price(order.symbol, order.stop_price)
+                params['stopPrice'] = self._format_price(ccxt_symbol, order.stop_price)
             if order.reduce_only:
                 params['reduceOnly'] = True
 
@@ -867,6 +884,7 @@ class BinanceClient(ExchangeClient):
         """Setup Binance exchange connection"""
         try:
             logging.info(f"Setting up Binance with testnet={self.credentials.testnet}")
+            # Configure Binance client for futures trading
             config = {
                 'apiKey': self.credentials.api_key,
                 'secret': self.credentials.api_secret,
@@ -876,31 +894,42 @@ class BinanceClient(ExchangeClient):
                     'adjustForTimeDifference': True,
                     'recvWindow': 60000,
                     'warnOnFetchOHLCVLimitArgument': False,
-                    'createMarketBuyOrderRequiresPrice': False
+                    'createMarketBuyOrderRequiresPrice': False,
+                    'sandboxMode': False,
+                    # Avoid calling SAPI capital endpoints that require mainnet keys
+                    'fetchCurrencies': False,
                 }
             }
 
             if self.credentials.testnet:
+                # ccxt deprecates futures testnet flag; override URLs instead
+                # and keep options.testnet = False to avoid NotSupported error.
+                config['options']['testnet'] = False
                 config['urls'] = {
                     'api': {
-                        'public': 'https://testnet.binancefuture.com/fapi/v1',
-                        'private': 'https://testnet.binancefuture.com/fapi/v1',
+                        # Route futures (fapi) requests to testnet domain
+                        'fapi': 'https://testnet.binancefuture.com/fapi',
+                        # Avoid SAPI where possible on testnet; keep defaultType=future
+                        'public': 'https://testnet.binancefuture.com',
+                        'private': 'https://testnet.binancefuture.com',
                     }
                 }
-                config['options']['defaultType'] = 'future'
-                config['options']['testnet'] = True
+                logging.info("Using Binance Futures Testnet via URL override")
+            else:
+                config['options']['testnet'] = False
 
+            # Use the main Binance client with defaultType=future
             self._exchange = ccxt.binance(config)
-            
-            # Test connection
+
+            # Load markets first (futures-only) to avoid SAPI margin calls
+            logging.info("Loading Binance markets (futures-only)...")
+            await self._load_markets()
+            logging.info("Binance markets loaded successfully")
+
+            # Test connection after markets are loaded
             logging.info("Testing Binance connection...")
             await asyncio.to_thread(self._exchange.fetch_balance)
             logging.info("Binance connection test successful")
-            
-            # Load markets
-            logging.info("Loading Binance markets...")
-            await self._load_markets()
-            logging.info("Binance markets loaded successfully")
 
             return True
             
@@ -909,6 +938,29 @@ class BinanceClient(ExchangeClient):
             import traceback
             logging.error(f"Traceback:\n{traceback.format_exc()}")
             return False
+
+    async def _load_markets(self) -> None:
+        """Load Binance futures market data only"""
+        try:
+            if not self._exchange:
+                raise ValueError("Exchange not initialized")
+
+            self._rate_limit()
+            # Restrict market loading to futures to avoid SAPI margin endpoints
+            markets = await asyncio.to_thread(self._exchange.load_markets, False, {'type': 'future'})
+
+            # Cache market info
+            for symbol, market in markets.items():
+                market_info = MarketInfo.from_exchange_market(market)
+                if market_info:
+                    self._market_cache[symbol] = market_info
+                    self._market_cache_time[symbol] = time.time()
+
+            logging.info(f"Loaded {len(self._market_cache)} Binance futures markets")
+
+        except Exception as e:
+            logging.error(f"Error loading Binance markets: {e}")
+            raise
         
     async def get_leverage_brackets(self, symbol: str) -> List[Dict[str, Any]]:
         """Get leverage brackets"""
@@ -1048,24 +1100,44 @@ class ExchangeManager:
             logging.info("Starting exchange initialization...")
             success = False  # Track if at least one exchange initialized
 
-            # Initialize Binance if configured
-            if self.config.exchange.binance_testnet_api_key:
-                try:
-                    logging.info("Initializing Binance...")
-                    binance_credentials = ExchangeCredentials(
-                        api_key=self.config.exchange.binance_testnet_api_key,
-                        api_secret=self.config.exchange.binance_testnet_api_secret,
-                        testnet=self.config.trading.use_testnet
-                    )
-                    binance_client = BinanceClient(binance_credentials)
-                    if await binance_client.initialize():
-                        self.exchanges['BINANCE'] = binance_client
-                        success = True
-                        logging.info("Binance initialized successfully")
+            # Initialize Binance according to USE_TESTNET and available keys
+            try:
+                if self.config.trading.use_testnet:
+                    if self.config.exchange.binance_testnet_api_key:
+                        logging.info("Initializing Binance (testnet)...")
+                        binance_credentials = ExchangeCredentials(
+                            api_key=self.config.exchange.binance_testnet_api_key,
+                            api_secret=self.config.exchange.binance_testnet_api_secret,
+                            testnet=True
+                        )
+                        binance_client = BinanceClient(binance_credentials)
+                        if await binance_client.initialize():
+                            self.exchanges['BINANCE'] = binance_client
+                            success = True
+                            logging.info("Binance (testnet) initialized successfully")
+                        else:
+                            logging.error("Failed to initialize Binance (testnet)")
                     else:
-                        logging.error("Failed to initialize Binance")
-                except Exception as e:
-                    logging.error(f"Error initializing Binance: {e}")
+                        logging.warning("USE_TESTNET is true but BINANCE_TESTNET_API_KEY not set; skipping Binance")
+                else:
+                    if self.config.exchange.binance_api_key:
+                        logging.info("Initializing Binance (mainnet)...")
+                        binance_credentials = ExchangeCredentials(
+                            api_key=self.config.exchange.binance_api_key,
+                            api_secret=self.config.exchange.binance_api_secret,
+                            testnet=False
+                        )
+                        binance_client = BinanceClient(binance_credentials)
+                        if await binance_client.initialize():
+                            self.exchanges['BINANCE'] = binance_client
+                            success = True
+                            logging.info("Binance (mainnet) initialized successfully")
+                        else:
+                            logging.error("Failed to initialize Binance (mainnet)")
+                    else:
+                        logging.warning("USE_TESTNET is false but BINANCE_API_KEY not set; skipping Binance")
+            except Exception as e:
+                logging.error(f"Error initializing Binance: {e}")
             
             # Initialize OKX if configured
             if self.config.exchange.okx_testnet_api_key:

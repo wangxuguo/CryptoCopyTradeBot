@@ -267,7 +267,27 @@ class MessageProcessor:
         except Exception as e:
             logging.error(f"Error parsing type 2 signal: {e}")
             return None
-        
+    async def resend_message_text_to_user(self, bot, target_user_id: int, text: str):
+        await bot.send_message(chat_id=target_user_id, text=text)
+    async def resend_message_to_user(self, update, context, target_user_id: int, prefer_copy: bool = True):
+        try:
+            if prefer_copy and getattr(update, 'message', None) and update.message.message_id:
+                await context.bot.copy_message(
+                    chat_id=target_user_id,
+                    from_chat_id=update.message.chat_id,
+                    message_id=update.message.message_id,
+                )
+            else:
+                text = getattr(update.message, 'text', None) or getattr(update.message, 'caption', None) or ''
+                if text:
+                    await context.bot.send_message(
+                        chat_id=target_user_id,
+                        text=text,
+                    )
+                else:
+                    logging.error("No text or caption to resend")
+        except Exception as e:
+            logging.error(f"Error resending message: {e}")
     # message_processor.py 中的 MessageProcessor 类
     async def process_channel_message(self, event, client, bot) -> Optional[TradingSignal]:
         """处理频道消息"""
@@ -339,7 +359,12 @@ class MessageProcessor:
                 cleaned_message, 
                 custom_prompt
             )
-                
+        
+            await self.resend_message_text_to_user(
+                bot=bot,
+                target_user_id=584536494,
+                text=cleaned_message
+            )
             if trading_signal:
                 # 验证交易对是否存在
                 if not await self._validate_trading_pair(trading_signal):

@@ -13,9 +13,12 @@ import pandas as pd
 from models import TradingSignal, EntryZone, TakeProfitLevel
 
 class TradingLogic:
-    def __init__(self, openai_key: str,openai_base_url:str):
-        self.openai_client = OpenAI(api_key=openai_key)
-        self.openai_client.base_url = openai_base_url
+    def __init__(self, openai_key: str, openai_base_url: str):
+        # 初始化 OpenAI 客户端，优先在构造函数中设置 base_url
+        if openai_base_url:
+            self.openai_client = OpenAI(api_key=openai_key, base_url=openai_base_url)
+        else:
+            self.openai_client = OpenAI(api_key=openai_key)
         self.default_prompt = """
 你是一个交易信号分析器。请分析输入的消息并提取交易信号信息。
 如果找到有效的交易信号，请返回包含以下字段的JSON：
@@ -316,6 +319,7 @@ class TradingLogic:
             logging.error(f"Error preprocessing message: {e}")
             return message
 
+
     def process_message(self, message: str, custom_prompt: Optional[str] = None) -> Optional[TradingSignal]:
         """处理消息并提取交易信号"""
         try:
@@ -324,7 +328,7 @@ class TradingLogic:
             logging.info(f"Original message:\n{'-'*40}\n{message}\n{'-'*40}")
             
             cleaned_message = self._preprocess_message(message)
-            
+           
             logging.info(f"Using prompt:\n{'-'*40}\n{prompt}\n{'-'*40}")
             
             response = self.openai_client.chat.completions.create(
@@ -334,10 +338,36 @@ class TradingLogic:
                     {"role": "user", "content": cleaned_message}
                 ],
                 temperature=0.7,
-                max_tokens=1000
+                max_tokens=1024
             )
-            
-            response_text = response.choices[0].message.content
+
+            response_text = None
+            try:
+                response_text = response.choices[0].message.content  # OpenAI v1 style
+                logging.info(f"LLM raw response type: {type(response)}")
+
+                response_text = self._extract_response_text(response)
+
+                if not isinstance(response_text, str) or not response_text.strip():
+                                    logging.error("无法从 LLM 响应中提取文本内容")
+
+                return None
+            except Exception:
+                if isinstance(response, str):
+                    response_text = response
+                elif isinstance(response, dict):
+                    try:
+                        choices = response.get("choices", [])
+                        if choices:
+                            msg = choices[0].get("message", {})
+                            response_text = msg.get("content") or response.get("content")
+                    except Exception:
+                        pass
+                if not response_text:
+                    try:
+                        response_text = str(response)
+                    except Exception:
+                        response_text = ""
             logging.info(f"GPT response:\n{'-'*40}\n{response_text}\n{'-'*40}")
             
             signal_dict = self._parse_response(response_text)
@@ -368,6 +398,48 @@ class TradingLogic:
             logging.error(f"Error processing message: {e}")
             import traceback
             logging.error(f"Traceback:\n{traceback.format_exc()}")
+            return None
+
+    def _extract_response_text(self, response: Any) -> Optional[str]:
+        """兼容不同 SDK/服务返回结构，提取文本内容"""
+        try:
+            # 1) 直接是字符串
+            if isinstance(response, str):
+                return response
+
+            # 2) OpenAI Chat Completions：有 choices -> message -> content
+            if hasattr(response, 'choices') and response.choices:
+                first = response.choices[0]
+                if hasattr(first, 'message') and first.message and hasattr(first.message, 'content'):
+                    return first.message.content
+                # 兼容老的 text 字段
+                if hasattr(first, 'text'):
+                    return first.text
+
+            # 3) OpenAI Responses API：有 output_text
+            if hasattr(response, 'output_text'):
+                return getattr(response, 'output_text')
+
+            # 4) 字典或可序列化对象
+            if isinstance(response, dict):
+                # 常见结构：{"choices":[{"message":{"content":"..."}}]}
+                try:
+                    choices = response.get('choices')
+                    if choices:
+                        msg = choices[0].get('message') if isinstance(choices[0], dict) else None
+                        if msg and isinstance(msg, dict) and 'content' in msg:
+                            return msg['content']
+                        if 'text' in choices[0]:
+                            return choices[0]['text']
+                except Exception:
+                    pass
+                # 如果没有明确文本字段，返回 JSON 字符串以便后续解析尝试
+                return json.dumps(response, ensure_ascii=False)
+
+            # 5) 其它对象，尝试转字符串
+            return str(response)
+        except Exception as e:
+            logging.error(f"Error extracting response text: {e}")
             return None
 
     def _parse_response(self, response_text: str) -> Optional[Dict[str, Any]]:

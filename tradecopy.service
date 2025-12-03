@@ -1,0 +1,14 @@
+[Unit]
+Description=TradeCopy Daemon
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/CryptoCopyTradeBot
+ExecStart=/bin/bash -c 'source /home/ubuntu/CryptoCopyTradeBot/.venv/bin/activate && python main.py'
+Restart=on-failure
+RestartSec=10
+Environment=PATH=/home/ubuntu/CryptoCopyTradeBot/.venv/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
