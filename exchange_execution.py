@@ -709,10 +709,10 @@ class ExchangeClient(ABC):
             norm = self._normalize_symbol(symbol)
             if getattr(self, 'exchange_name', '') == 'OKX':
                 await asyncio.to_thread(
-                    self._exchange.setMarginMode,
-                    margin_mode,
+                    self._exchange.setLeverage,
+                    actual_leverage,
                     norm,
-                    {'lever': actual_leverage}
+                    {'mgnMode': margin_mode}
                 )
             else:
                 await asyncio.to_thread(
@@ -720,15 +720,6 @@ class ExchangeClient(ABC):
                     margin_mode,
                     norm
                 )
-            
-            if getattr(self, 'exchange_name', '') == 'OKX':
-                await asyncio.to_thread(
-                    self._exchange.setLeverage,
-                    actual_leverage,
-                    norm,
-                    {'mgnMode': margin_mode}
-                )
-            else:
                 await asyncio.to_thread(
                     self._exchange.setLeverage,
                     actual_leverage,
