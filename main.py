@@ -325,34 +325,34 @@ class TradingBot:
     async def show_positions_menu(self, message):
         """显示持仓概览和管理选项"""
         try:
-            positions = await self.exchange_manager.get_all_positions()
+            positions_by_exchange = await self.exchange_manager.get_positions()
             
             keyboard = []
             network_indicator = BT.TESTNET_INDICATOR if self.config.trading.use_testnet else BT.MAINNET_INDICATOR
             position_text = f"{network_indicator} 当前持仓:\n\n"
             
-            for exchange, exchange_positions in positions.items():
-                active_positions = [p for p in exchange_positions if p['size'] != 0]
+            for exchange_name, exchange_positions in positions_by_exchange.items():
+                active_positions = [p for p in exchange_positions if getattr(p, 'size', 0) != 0]
                 if not active_positions:
                     continue
                     
-                position_text += f"📈 {exchange}:\n"
+                position_text += f"📈 {exchange_name}:\n"
                 for pos in active_positions:
-                    direction = BT.DIRECTION_LONG if pos['size'] > 0 else BT.DIRECTION_SHORT
+                    direction = BT.DIRECTION_LONG if pos.side == PositionSide.LONG else BT.DIRECTION_SHORT
                     position_text += (
-                        f"{pos['symbol']}: {direction}\n"
-                        f"数量: {abs(pos['size'])}\n"
-                        f"入场价: {pos['entry_price']:.2f}\n"
-                        f"未实现盈亏: {pos['unrealized_pnl']:.2f} USDT\n\n"
+                        f"{pos.symbol}: {direction}\n"
+                        f"数量: {abs(pos.size):.4f}\n"
+                        f"入场价: {pos.entry_price:.6f}\n"
+                        f"未实现盈亏: {pos.unrealized_pnl:.2f} USDT\n\n"
                     )
                     keyboard.append([
                         InlineKeyboardButton(
-                            f"修改 {pos['symbol']}",
-                            callback_data=f"modify_{exchange}_{pos['symbol']}"
+                            f"修改 {pos.symbol}",
+                            callback_data=f"modify_{exchange_name}_{pos.symbol}"
                         ),
                         InlineKeyboardButton(
-                            f"平仓 {pos['symbol']}",
-                            callback_data=f"close_{exchange}_{pos['symbol']}"
+                            f"平仓 {pos.symbol}",
+                            callback_data=f"close_{exchange_name}_{pos.symbol}"
                         )
                     ])
             

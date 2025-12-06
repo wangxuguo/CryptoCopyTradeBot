@@ -352,87 +352,8 @@ class TradingLogic:
 
             response_text = None
             try:
-                response_text = response.choices[0].message.content  # OpenAI v1 style
                 logging.info(f"LLM raw response type: {type(response)}")
-
-                response_text = self._extract_response_text(response)
-
-                if not isinstance(response_text, str) or not response_text.strip():
-                                    logging.error("无法从 LLM 响应中提取文本内容")
-
-                return None
-            except Exception:
-                if isinstance(response, str):
-                    response_text = response
-                elif isinstance(response, dict):
-                    try:
-                        choices = response.get("choices", [])
-                        if choices:
-                            msg = choices[0].get("message", {})
-                            response_text = msg.get("content") or response.get("content")
-                    except Exception:
-                        pass
-                if not response_text:
-                    try:
-                        response_text = str(response)
-                    except Exception:
-                        response_text = ""
-            logging.info(f"GPT response:\n{'-'*40}\n{response_text}\n{'-'*40}")
-            
-            signal_dict = self._parse_response(response_text)
-            if signal_dict:
-                logging.info(f"Parsed signal dictionary:\n{'-'*40}\n{json.dumps(signal_dict, indent=2)}\n{'-'*40}")
-                
-                if self._validate_json_data(signal_dict):
-                    normalized_dict = self._normalize_numbers(signal_dict)
-                    signal = self._convert_to_trading_signal(normalized_dict)
-                    
-                    if signal and signal.is_valid():
-                        risk_ratio_valid = True#self._validate_risk_ratio(signal)
-                        logging.info(f"Risk ratio validation: {risk_ratio_valid}")
-                        if risk_ratio_valid:
-                            return signal
-                        else:
-                            logging.error("Risk ratio validation failed")
-                    else:
-                        logging.error("Signal validation failed")
-                else:
-                    logging.error("JSON data validation failed")
-            else:
-                logging.error("Failed to parse GPT response")
-
-            return None
-            
-        except Exception as e:
-            logging.error(f"Error processing message: {e}")
-            import traceback
-            logging.error(f"Traceback:\n{traceback.format_exc()}")
-            return None
-            cleaned_message = self._preprocess_message(message)
-           
-            logging.info(f"Using prompt:\n{'-'*40}\n{prompt}\n{'-'*40}")
-            
-            response = self.openai_client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": cleaned_message}
-                ],
-                temperature=0.7,
-                max_tokens=1024
-            )
-
-            response_text = None
-            try:
-                response_text = response.choices[0].message.content  # OpenAI v1 style
-                logging.info(f"LLM raw response type: {type(response)}")
-
-                response_text = self._extract_response_text(response)
-
-                if not isinstance(response_text, str) or not response_text.strip():
-                                    logging.error("无法从 LLM 响应中提取文本内容")
-
-                return None
+                response_text = response.choices[0].message.content
             except Exception:
                 if isinstance(response, str):
                     response_text = response

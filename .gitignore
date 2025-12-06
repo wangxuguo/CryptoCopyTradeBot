@@ -7,3 +7,5 @@ bot.log
 *.session
 .venv
 *.db
+*.sqlite
+.session-journal
