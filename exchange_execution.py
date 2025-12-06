@@ -790,7 +790,11 @@ class ExchangeClient(ABC):
     async def create_order(self, order: OrderParams) -> OrderResult:
         """Create order with proper price and leverage handling"""
         try:
+            if order.order_type == OrderType.LIMIT and not order.price:
+                logging.warning(f"Limit order missing price for {order.symbol}, switching to MARKET")
+                order.order_type = OrderType.MARKET
             if not order.validate():
+                logging.error(f"Order validation failed: symbol={order.symbol}, side={order.side}, type={order.order_type}, amount={order.amount}, price={order.price}, stop_price={order.stop_price}, reduce_only={order.reduce_only}")
                 raise OrderException("Invalid order parameters")
                 
             ccxt_symbol = self._normalize_symbol(order.symbol)
