@@ -486,6 +486,17 @@ class ExchangeClient(ABC):
             body['lever'] = str(params['lever'])
         if 'clOrdId' in params:
             body['clOrdId'] = params['clOrdId']
+        # Inline TP/SL attachment when provided
+        tp_px = params.get('tpTriggerPx') or params.get('takeProfitPrice')
+        sl_px = params.get('slTriggerPx') or params.get('stopLossPrice')
+        if tp_px is not None:
+            body['tpTriggerPx'] = str(tp_px)
+            body['tpOrdPx'] = '-1'
+            body['tpTriggerPxType'] = 'last'
+        if sl_px is not None:
+            body['slTriggerPx'] = str(sl_px)
+            body['slOrdPx'] = '-1'
+            body['slTriggerPxType'] = 'last'
         return await self._okx_request('/api/v5/trade/order', 'POST', body)
 
     async def _okx_attach_tp_sl(self, symbol: str, side_close: str, amount_contracts: int, td_mode: str,
@@ -952,6 +963,16 @@ class ExchangeClient(ABC):
             if getattr(self, 'exchange_name', '') == 'OKX':
                 params_extras['tdMode'] = order.margin_mode  # 'cross' 或 'isolated'
                 params_extras['lever'] = actual_leverage
+                # Prefer inline TP/SL when provided in order params
+                try:
+                    tp_px = order.extra_params.get('tpTriggerPx') or order.extra_params.get('takeProfitPrice')
+                    sl_px = order.extra_params.get('slTriggerPx') or order.extra_params.get('stopLossPrice') or order.stop_price
+                    if tp_px is not None:
+                        params_extras['tpTriggerPx'] = self._format_price(ccxt_symbol, float(tp_px))
+                    if sl_px is not None:
+                        params_extras['slTriggerPx'] = self._format_price(ccxt_symbol, float(sl_px))
+                except Exception:
+                    pass
 
             if order.extra_params:
                 try:
@@ -965,19 +986,19 @@ class ExchangeClient(ABC):
                     pass
 
             logging.info(f"""
-    Creating order:
-    Symbol: {order.symbol}
-    USDT Amount Intended: {order.amount}
-    Leverage: {conversion_info['leverage']}x
-    Coin Quantity: {quantity}
-    Type: {type_arg}
-    Side: {side_arg}
-    Price: {price_arg}
-    Stop Price: {params_extras.get('stopPrice')}
-    Margin Mode: {order.margin_mode}
-    Initial Margin: {conversion_info['initial_margin']} USDT
-    Notional Value: {conversion_info['notional_value']} USDT
-    """)
+                Creating order:
+                Symbol: {order.symbol}
+                USDT Amount Intended: {order.amount}
+                Leverage: {conversion_info['leverage']}x
+                Coin Quantity: {quantity}
+                Type: {type_arg}
+                Side: {side_arg}
+                Price: {price_arg}
+                Stop Price: {params_extras.get('stopPrice')}
+                Margin Mode: {order.margin_mode}
+                Initial Margin: {conversion_info['initial_margin']} USDT
+                Notional Value: {conversion_info['notional_value']} USDT
+                """)
 
             # Execute order
             if getattr(self, 'exchange_name', '') == 'OKX':
@@ -1067,7 +1088,10 @@ class ExchangeClient(ABC):
             amount_contracts = max(1, int(math.floor(executed_amount)))
             norm = self._normalize_symbol(symbol)
             raw = await self._okx_attach_tp_sl(norm, side_close, amount_contracts, margin_mode, pos_side, take_profit, stop_loss)
-            return str(raw.get('code')) == '0'
+            ok = str(raw.get('code')) == '0'
+            if not ok:
+                logging.warning(f"OKX attach TP/SL failed: {raw}")
+            return ok
         except Exception as e:
             logging.error(f"Error attaching TP/SL: {e}")
             return False
@@ -1446,11 +1470,11 @@ class ExchangeManager:
                     zone_amount = total_amount * zone.percentage
 
                     logging.info(f"""
-Processing Entry Zone:
-Price: {zone.price}
-Percentage: {zone.percentage}
-USDT Amount: {zone_amount}
-""")
+                        Processing Entry Zone:
+                        Price: {zone.price}
+                        Percentage: {zone.percentage}
+                        USDT Amount: {zone_amount}
+                        """)
 
                     order = OrderParams(
                         symbol=signal.symbol,
@@ -1471,11 +1495,14 @@ USDT Amount: {zone_amount}
                         # 更新区间状态
                         zone.order_id = result.order_id
                         zone.status = 'PLACED'
-                        # 附加 TP/SL（使用首个 TP）
                         tp_price = None
-                        if signal.take_profit_levels:
-                            tp_price = signal.take_profit_levels[0].price
                         sl_price = signal.stop_loss
+                        try:
+                            if order.extra_params:
+                                tp_price = order.extra_params.get('tpTriggerPx') or order.extra_params.get('takeProfitPrice') or tp_price
+                                sl_price = order.extra_params.get('slTriggerPx') or order.extra_params.get('stopLossPrice') or sl_price
+                        except Exception:
+                            pass
                         try:
                             attached = await exchange.attach_tp_sl(
                                 signal.symbol,
@@ -1518,6 +1545,12 @@ USDT Amount: {zone_amount}
                     if signal.take_profit_levels:
                         tp_price = signal.take_profit_levels[0].price
                     sl_price = signal.stop_loss
+                    try:
+                        if order.extra_params:
+                            tp_price = order.extra_params.get('tpTriggerPx') or order.extra_params.get('takeProfitPrice') or tp_price
+                            sl_price = order.extra_params.get('slTriggerPx') or order.extra_params.get('stopLossPrice') or sl_price
+                    except Exception:
+                        pass
                     try:
                         attached = await exchange.attach_tp_sl(
                             signal.symbol,
