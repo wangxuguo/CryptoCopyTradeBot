@@ -362,7 +362,7 @@ class MessageProcessor:
                         for ex_name, positions in positions_by_ex.items():
                             lines.append(f"{ex_name}:")
                             for pos in positions:
-                                side = '做多' if getattr(pos, 'size', 0) > 0 or getattr(pos, 'side', '').upper() == 'LONG' else '做空'
+                                side = '做多' if getattr(pos, 'size', 0) > 0 or getattr(pos, 'side', '').upper() == 'OPEN_LONG' else '做空'
                                 lines.append(
                                     f"{getattr(pos, 'symbol', '')} {side} 量: {abs(getattr(pos, 'size', 0))} 入场: {getattr(pos, 'entry_price', 0):.6f} 未盈亏: {getattr(pos, 'unrealized_pnl', 0):.2f}"
                                 )

@@ -488,6 +488,41 @@ class ExchangeClient(ABC):
             body['clOrdId'] = params['clOrdId']
         return await self._okx_request('/api/v5/trade/order', 'POST', body)
 
+    async def _okx_attach_tp_sl(self, symbol: str, side_close: str, amount_contracts: int, td_mode: str,
+                                pos_side: Optional[str], tp_price: Optional[float], sl_price: Optional[float]) -> Dict[str, Any]:
+        market = await asyncio.to_thread(self._exchange.market, symbol)
+        inst_id = market.get('id')
+        body: Dict[str, Any] = {
+            'instId': inst_id,
+            'side': side_close.lower(),
+            'tdMode': str(td_mode).lower(),
+            'sz': str(int(amount_contracts)),
+        }
+        if pos_side:
+            body['posSide'] = pos_side.lower()
+        # Prefer OCO when both provided, otherwise conditional
+        if tp_price is not None and sl_price is not None:
+            body['ordType'] = 'oco'
+            body['tpTriggerPx'] = str(tp_price)
+            body['tpOrdPx'] = '-1'
+            body['tpTriggerPxType'] = 'last'
+            body['slTriggerPx'] = str(sl_price)
+            body['slOrdPx'] = '-1'
+            body['slTriggerPxType'] = 'last'
+        elif tp_price is not None:
+            body['ordType'] = 'conditional'
+            body['tpTriggerPx'] = str(tp_price)
+            body['tpOrdPx'] = '-1'
+            body['tpTriggerPxType'] = 'last'
+        elif sl_price is not None:
+            body['ordType'] = 'conditional'
+            body['slTriggerPx'] = str(sl_price)
+            body['slOrdPx'] = '-1'
+            body['slTriggerPxType'] = 'last'
+        else:
+            return {'code': '0', 'data': []}
+        return await self._okx_request('/api/v5/trade/order-algo', 'POST', body)
+
     @abstractmethod
     async def _setup_exchange(self) -> bool:
         """Setup exchange connection"""
@@ -946,12 +981,43 @@ class ExchangeClient(ABC):
 
             # Execute order
             if getattr(self, 'exchange_name', '') == 'OKX':
+                # 自动适配账户持仓模式
+                pos_mode = getattr(self, 'pos_mode', None)
+                if not params_extras.get('posSide'):
+                    if pos_mode == 'long_short':
+                        params_extras['posSide'] = 'long' if side_arg == 'buy' else 'short'
+                    elif pos_mode == 'net':
+                        params_extras.pop('posSide', None)
+
                 raw = await self._okx_create_order(symbol_arg, type_arg, side_arg, amount_arg, price_arg, params_extras)
                 code = str(raw.get('code'))
                 if code != '0':
-                    raise OrderException(f"OKX order rejected: {raw}")
-                data_list = raw.get('data') or []
-                result = data_list[0] if data_list else {}
+                    # 针对 51010 账户模式错误的回退
+                    data_list_err = raw.get('data') or []
+                    sCode = str((data_list_err[0] or {}).get('sCode')) if data_list_err else ''
+                    if sCode == '51010':
+                        pe = dict(params_extras)
+                        pe.pop('posSide', None)
+                        pe['tdMode'] = 'cross'
+                        raw2 = await self._okx_create_order(symbol_arg, type_arg, side_arg, amount_arg, price_arg, pe)
+                        if str(raw2.get('code')) == '0':
+                            data_list = raw2.get('data') or []
+                            result = data_list[0] if data_list else {}
+                            raw = raw2
+                        else:
+                            pe['posSide'] = 'net'
+                            raw3 = await self._okx_create_order(symbol_arg, type_arg, side_arg, amount_arg, price_arg, pe)
+                            if str(raw3.get('code')) == '0':
+                                data_list = raw3.get('data') or []
+                                result = data_list[0] if data_list else {}
+                                raw = raw3
+                            else:
+                                raise OrderException(f"OKX order rejected: {raw3}")
+                    else:
+                        raise OrderException(f"OKX order rejected: {raw}")
+                else:
+                    data_list = raw.get('data') or []
+                    result = data_list[0] if data_list else {}
             else:
                 result = await asyncio.to_thread(
                     self._exchange.createOrder,
@@ -984,7 +1050,28 @@ class ExchangeClient(ABC):
 
         except Exception as e:
             logging.error(f"Error creating order: {e}")
-            raise  # 关键操作直接抛出异常
+            raise
+
+    async def attach_tp_sl(self, symbol: str, side_open: str, executed_amount: float,
+                           margin_mode: str, take_profit: Optional[float], stop_loss: Optional[float]) -> bool:
+        try:
+            if getattr(self, 'exchange_name', '') != 'OKX':
+                return False
+            # Determine closing side
+            side_close = 'sell' if side_open.lower() == 'buy' else 'buy'
+            # Determine posSide according to account mode
+            pos_side = None
+            if getattr(self, 'pos_mode', None) == 'long_short':
+                pos_side = 'long' if side_open.lower() == 'buy' else 'short'
+            # Contracts size must be integer
+            amount_contracts = max(1, int(math.floor(executed_amount)))
+            norm = self._normalize_symbol(symbol)
+            raw = await self._okx_attach_tp_sl(norm, side_close, amount_contracts, margin_mode, pos_side, take_profit, stop_loss)
+            return str(raw.get('code')) == '0'
+        except Exception as e:
+            logging.error(f"Error attaching TP/SL: {e}")
+            return False
+
 
     def _format_price(self, symbol: str, price: float) -> float:
         """Format price according to symbol precision"""
@@ -1154,6 +1241,7 @@ class OKXClient(ExchangeClient):
         super().__init__(credentials)
         self.min_request_interval = 0.02
         self.exchange_name = 'OKX'
+        self.pos_mode: Optional[str] = None  # 'net' 或 'long_short'
 
     async def _setup_exchange(self) -> bool:
         """Setup OKX exchange connection"""
@@ -1185,6 +1273,19 @@ class OKXClient(ExchangeClient):
             logging.info("Loading OKX markets...")
             await self._load_markets()
             logging.info("OKX markets loaded successfully")
+
+            try:
+                cfg = await self._okx_request('/api/v5/account/config', 'GET', {})
+                if cfg and cfg.get('code') == '0':
+                    data = (cfg.get('data') or [{}])[0]
+                    pm = str(data.get('posMode') or '').lower()
+                    if pm.startswith('long'):
+                        self.pos_mode = 'long_short'
+                    elif pm.startswith('net'):
+                        self.pos_mode = 'net'
+                    logging.info(f"OKX position mode: {self.pos_mode}")
+            except Exception as e:
+                logging.warning(f"Unable to fetch OKX position mode: {e}")
 
             return True
             
@@ -1370,6 +1471,26 @@ USDT Amount: {zone_amount}
                         # 更新区间状态
                         zone.order_id = result.order_id
                         zone.status = 'PLACED'
+                        # 附加 TP/SL（使用首个 TP）
+                        tp_price = None
+                        if signal.take_profit_levels:
+                            tp_price = signal.take_profit_levels[0].price
+                        sl_price = signal.stop_loss
+                        try:
+                            attached = await exchange.attach_tp_sl(
+                                signal.symbol,
+                                OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
+                                result.executed_amount,
+                                signal.margin_mode,
+                                tp_price,
+                                sl_price
+                            )
+                            if attached:
+                                logging.info("Attached TP/SL for zone order")
+                            else:
+                                logging.warning("Failed to attach TP/SL for zone order")
+                        except Exception as e:
+                            logging.error(f"Error attaching TP/SL: {e}")
                     else:
                         logging.error(f"Failed to create order for zone: {zone}")
 
@@ -1391,7 +1512,28 @@ USDT Amount: {zone_amount}
                     extra_params={}
                 )
 
-                return await exchange.create_order(order)
+                result = await exchange.create_order(order)
+                if result.success:
+                    tp_price = None
+                    if signal.take_profit_levels:
+                        tp_price = signal.take_profit_levels[0].price
+                    sl_price = signal.stop_loss
+                    try:
+                        attached = await exchange.attach_tp_sl(
+                            signal.symbol,
+                            OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
+                            result.executed_amount,
+                            signal.margin_mode,
+                            tp_price,
+                            sl_price
+                        )
+                        if attached:
+                            logging.info("Attached TP/SL for entry order")
+                        else:
+                            logging.warning("Failed to attach TP/SL for entry order")
+                    except Exception as e:
+                        logging.error(f"Error attaching TP/SL: {e}")
+                return result
 
         except Exception as e:
             logging.error(f"Error executing signal: {e}")
