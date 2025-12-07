@@ -843,12 +843,11 @@ class ExchangeClient(ABC):
                 params_extras['tdMode'] = order.margin_mode  # 'cross' 或 'isolated'
                 params_extras['lever'] = actual_leverage
 
-            if order.stop_price:
-                params['stopPrice'] = self._format_price(ccxt_symbol, order.stop_price)
-            if order.reduce_only:
-                params['reduceOnly'] = True
-
-            params.update(order.extra_params)
+            if order.extra_params:
+                try:
+                    params_extras.update(order.extra_params)
+                except Exception:
+                    pass
 
             logging.info(f"""
     Creating order:
@@ -856,10 +855,10 @@ class ExchangeClient(ABC):
     USDT Amount Intended: {order.amount}
     Leverage: {conversion_info['leverage']}x
     Coin Quantity: {quantity}
-    Type: {params['type']}
-    Side: {params['side']}
-    Price: {params.get('price')}
-    Stop Price: {params.get('stopPrice')}
+    Type: {type_arg}
+    Side: {side_arg}
+    Price: {price_arg}
+    Stop Price: {params_extras.get('stopPrice')}
     Margin Mode: {order.margin_mode}
     Initial Margin: {conversion_info['initial_margin']} USDT
     Notional Value: {conversion_info['notional_value']} USDT
