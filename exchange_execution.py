@@ -5,6 +5,9 @@ import os
 import asyncio
 import json 
 import math
+import hmac
+import hashlib
+import base64
 import time
 import logging
 from abc import ABC, abstractmethod
@@ -436,6 +439,48 @@ class ExchangeClient(ABC):
             return f"{base}/{quote}:USDT"
         return f"{base}/{quote}"
 
+    async def _okx_request(self, path: str, method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        ts = datetime.utcnow().isoformat(timespec='milliseconds') + 'Z'
+        body = json.dumps(payload, separators=(',', ':'))
+        prehash = f"{ts}{method}{path}{body}"
+        sign = hmac.new(self.credentials.api_secret.encode(), prehash.encode(), hashlib.sha256).digest()
+        sign_b64 = base64.b64encode(sign).decode()
+        headers = {
+            'OK-ACCESS-KEY': self.credentials.api_key,
+            'OK-ACCESS-SIGN': sign_b64,
+            'OK-ACCESS-TIMESTAMP': ts,
+            'OK-ACCESS-PASSPHRASE': self.credentials.passphrase or '',
+            'Content-Type': 'application/json'
+        }
+        if getattr(self.credentials, 'testnet', False):
+            headers['x-simulated-trading'] = '1'
+        url = f"https://www.okx.com{path}"
+        async with self._session.post(url, headers=headers, data=body) as resp:
+            data = await resp.json()
+            return data
+
+    async def _okx_create_order(self, symbol: str, type_arg: str, side_arg: str, amount_arg: float, price_arg: Optional[float], params: Dict[str, Any]) -> Dict[str, Any]:
+        market = await asyncio.to_thread(self._exchange.market, symbol)
+        inst_id = market.get('id')
+        body: Dict[str, Any] = {
+            'instId': inst_id,
+            'tdMode': str(params.get('tdMode') or 'cross').lower(),
+            'side': side_arg.lower(),
+            'ordType': type_arg.lower(),
+            'sz': str(int(amount_arg)) if isinstance(amount_arg, (int, float)) else str(amount_arg)
+        }
+        if price_arg is not None and type_arg == 'limit':
+            body['px'] = str(price_arg)
+        if 'posSide' in params:
+            body['posSide'] = str(params['posSide']).lower()
+        if 'reduceOnly' in params:
+            body['reduceOnly'] = params['reduceOnly']
+        if 'lever' in params:
+            body['lever'] = str(params['lever'])
+        if 'clOrdId' in params:
+            body['clOrdId'] = params['clOrdId']
+        return await self._okx_request('/api/v5/trade/order', 'POST', body)
+
     @abstractmethod
     async def _setup_exchange(self) -> bool:
         """Setup exchange connection"""
@@ -745,45 +790,57 @@ class ExchangeClient(ABC):
             leverage_info = await self.get_market_leverage_info(self._normalize_symbol(symbol))
             actual_leverage = min(leverage, leverage_info['max_leverage'])
             
-            # Calculate quantity with leverage
-            # 实际可买币数 = (USDT金额 * 杠杆) / 价格
-            notional_value = usdt_amount * actual_leverage  # 名义价值
-            quantity = notional_value / price  # 可买币数
-
-            # 应用精度要求
-            formatted_quantity = self._format_amount(self._normalize_symbol(symbol), quantity)
-            # 应用最小数量与整数合约要求
-            try:
-                min_qty = market_info.min_amount or 0
-                if market_info.amount_precision == 0:
-                    # 需要整数合约，至少为 1
-                    formatted_quantity = max(1.0, math.floor(formatted_quantity))
-                if min_qty and formatted_quantity < min_qty:
-                    formatted_quantity = min_qty
-            except Exception:
-                pass
-            
-            # 实际使用的保证金
-            actual_value = (formatted_quantity * price) / actual_leverage  
+            is_contract = (market_info.amount_precision == 0)
+            if is_contract:
+                ct = max(1e-12, float(market_info.contract_size or 1.0))
+                contracts_raw = (usdt_amount * actual_leverage) / (price * ct)
+                formatted_quantity = math.floor(contracts_raw)
+                if formatted_quantity < 1:
+                    raise OrderException("Amount too small to buy minimum 1 contract with given budget")
+                try:
+                    min_qty = market_info.min_amount or 0
+                    if min_qty and formatted_quantity < min_qty:
+                        raise OrderException(f"Amount {formatted_quantity} is below exchange min amount {min_qty}")
+                except Exception:
+                    pass
+                notional_calc = formatted_quantity * price * ct
+                actual_value = notional_calc / actual_leverage
+                raw_quantity = contracts_raw
+                notional_value_calc = notional_calc
+            else:
+                notional_value = usdt_amount * actual_leverage
+                quantity = notional_value / price
+                formatted_quantity = self._format_amount(self._normalize_symbol(symbol), quantity)
+                try:
+                    min_qty = market_info.min_amount or 0
+                    if min_qty and formatted_quantity < min_qty:
+                        raise OrderException(f"Amount {formatted_quantity} is below exchange min amount {min_qty}")
+                except Exception:
+                    pass
+                actual_value = (formatted_quantity * price) / actual_leverage
+                raw_quantity = quantity
+                notional_value_calc = formatted_quantity * price
+            if actual_value > usdt_amount:
+                raise OrderException(f"Insufficient budget: initial margin {actual_value:.2f} exceeds {usdt_amount:.2f}")
 
             logging.info(f"""
     Amount Conversion Details:
     USDT Amount: {usdt_amount}
     Price: {price}
     Leverage: {actual_leverage}x (max: {leverage_info['max_leverage']}x)
-    Raw Quantity: {quantity} (币数量)
-    Formatted Quantity: {formatted_quantity} (根据精度调整后的币数量)
-    Actual Margin: {actual_value} USDT (实际使用保证金)
-    Notional Value: {formatted_quantity * price} USDT (名义价值)
+    Raw Quantity: {raw_quantity}
+    Formatted Quantity: {formatted_quantity}
+    Actual Margin: {actual_value} USDT
+    Notional Value: {notional_value_calc} USDT
     Min Amount: {market_info.min_amount if market_info else 'Unknown'}
     Amount Precision: {market_info.amount_precision if market_info else 'Unknown'}
     """)
 
             return formatted_quantity, {
-                'raw_quantity': quantity,
+                'raw_quantity': raw_quantity,
                 'formatted_quantity': formatted_quantity,
-                'initial_margin': actual_value,  # 实际使用的保证金
-                'notional_value': formatted_quantity * price,  # 名义价值
+                'initial_margin': actual_value,
+                'notional_value': notional_value_calc,
                 'price': price,
                 'leverage': actual_leverage
             }
@@ -845,7 +902,12 @@ class ExchangeClient(ABC):
 
             if order.extra_params:
                 try:
-                    params_extras.update(order.extra_params)
+                    extras = dict(order.extra_params)
+                    # 防止触发 OKX 批量下单端点
+                    if getattr(self, 'exchange_name', '') == 'OKX':
+                        for k in ['orders', 'algoOrders', 'batch', 'list']:
+                            extras.pop(k, None)
+                    params_extras.update(extras)
                 except Exception:
                     pass
 
@@ -865,23 +927,39 @@ class ExchangeClient(ABC):
     """)
 
             # Execute order
-            result = await asyncio.to_thread(
-                self._exchange.createOrder,
-                symbol_arg,
-                type_arg,
-                side_arg,
-                amount_arg,
-                price_arg,
-                params_extras
-            )
+            if getattr(self, 'exchange_name', '') == 'OKX':
+                raw = await self._okx_create_order(symbol_arg, type_arg, side_arg, amount_arg, price_arg, params_extras)
+                code = str(raw.get('code'))
+                if code != '0':
+                    raise OrderException(f"OKX order rejected: {raw}")
+                data_list = raw.get('data') or []
+                result = data_list[0] if data_list else {}
+            else:
+                result = await asyncio.to_thread(
+                    self._exchange.createOrder,
+                    symbol_arg,
+                    type_arg,
+                    side_arg,
+                    amount_arg,
+                    price_arg,
+                    params_extras
+                )
 
+            if getattr(self, 'exchange_name', '') == 'OKX':
+                order_id = result.get('ordId') or result.get('id')
+                executed_price = float(result.get('px', 0) or use_price)
+                raw_info = raw
+            else:
+                order_id = result['id']
+                executed_price = float(result.get('price', 0) or use_price)
+                raw_info = result
             return OrderResult(
                 success=True,
-                order_id=result['id'],
-                executed_price=float(result.get('price', 0) or use_price),
+                order_id=order_id,
+                executed_price=executed_price,
                 executed_amount=quantity,
                 extra_info={
-                    'raw_response': result,
+                    'raw_response': raw_info,
                     'conversion_info': conversion_info
                 }
             )
@@ -1098,26 +1176,30 @@ class OKXClient(ExchangeClient):
             logging.error(f"Traceback:\n{traceback.format_exc()}")
             return False
         
-    async def get_leverage_brackets(self, symbol: str) -> List[Dict[str, Any]]:
-        """Get leverage brackets"""
+    async def get_leverage_brackets(self, symbol: str, margin_mode: str = 'cross') -> List[Dict[str, Any]]:
+        """Get leverage brackets for OKX instrument
+        Accepts ccxt symbol (e.g., BTC/USDT:USDT) and resolves to instId (e.g., BTC-USDT-SWAP).
+        """
         try:
             self._rate_limit()
+            norm = self._normalize_symbol(symbol)
+            market = await asyncio.to_thread(self._exchange.market, norm)
+            inst_id = market.get('id') or market.get('symbol') or norm
             response = await asyncio.to_thread(
                 self._exchange.privateGetAccountMaxSize,
                 {
-                    'instId': symbol,
-                    'tdMode': 'cross'
+                    'instId': inst_id,
+                    'tdMode': str(margin_mode).lower()
                 }
             )
-            
-            if response.get('code') == '0' and response.get('data'):
+            if response and response.get('code') == '0' and response.get('data'):
                 return [
                     {
-                        'maxLeverage': int(data['maxLever']),
-                        'maxSize': float(data['maxSz']),
-                        'maintMarginRatio': float(data['mmr'])
+                        'maxLeverage': int(d.get('maxLever', 1)),
+                        'maxSize': float(d.get('maxSz', 0) or 0),
+                        'maintMarginRatio': float(d.get('mmr', 0) or 0)
                     }
-                    for data in response['data']
+                    for d in response.get('data', [])
                 ]
             return []
         except Exception as e:
