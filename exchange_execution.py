@@ -752,6 +752,16 @@ class ExchangeClient(ABC):
 
             # 应用精度要求
             formatted_quantity = self._format_amount(self._normalize_symbol(symbol), quantity)
+            # 应用最小数量与整数合约要求
+            try:
+                min_qty = market_info.min_amount or 0
+                if market_info.amount_precision == 0:
+                    # 需要整数合约，至少为 1
+                    formatted_quantity = max(1.0, math.floor(formatted_quantity))
+                if min_qty and formatted_quantity < min_qty:
+                    formatted_quantity = min_qty
+            except Exception:
+                pass
             
             # 实际使用的保证金
             actual_value = (formatted_quantity * price) / actual_leverage  
@@ -811,22 +821,27 @@ class ExchangeClient(ABC):
                 actual_leverage  # 使用实际设置的杠杆
             )
 
-            # 创建订单参数
-            params = {
-                'symbol': ccxt_symbol,
-                'type': order.order_type.lower(),
-                'side': order.side.lower(),
-                'amount': quantity,  # 币的数量(已包含杠杆)
-            }
-
-            if getattr(self, 'exchange_name', '') == 'OKX':
-                params['tdMode'] = order.margin_mode  # 'cross' 或 'isolated'
-                params['lever'] = actual_leverage
+            # 创建订单参数（统一方法签名 + 额外参数）
+            symbol_arg = ccxt_symbol
+            type_arg = order.order_type.lower()
+            side_arg = order.side.lower()
+            amount_arg = quantity
+            price_arg = None
+            params_extras: Dict[str, Any] = {}
 
             if order.order_type == OrderType.LIMIT:
                 if not order.price:
                     raise OrderException("Price is required for limit orders")
-                params['price'] = self._format_price(ccxt_symbol, order.price)
+                price_arg = self._format_price(ccxt_symbol, order.price)
+            
+            if order.stop_price:
+                params_extras['stopPrice'] = self._format_price(ccxt_symbol, order.stop_price)
+            if order.reduce_only:
+                params_extras['reduceOnly'] = True
+            # 交易所特定参数（OKX）
+            if getattr(self, 'exchange_name', '') == 'OKX':
+                params_extras['tdMode'] = order.margin_mode  # 'cross' 或 'isolated'
+                params_extras['lever'] = actual_leverage
 
             if order.stop_price:
                 params['stopPrice'] = self._format_price(ccxt_symbol, order.stop_price)
@@ -853,7 +868,12 @@ class ExchangeClient(ABC):
             # Execute order
             result = await asyncio.to_thread(
                 self._exchange.createOrder,
-                **params
+                symbol_arg,
+                type_arg,
+                side_arg,
+                amount_arg,
+                price_arg,
+                params_extras
             )
 
             return OrderResult(
