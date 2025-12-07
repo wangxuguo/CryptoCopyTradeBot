@@ -708,16 +708,7 @@ class ExchangeClient(ABC):
             
             norm = self._normalize_symbol(symbol)
             if getattr(self, 'exchange_name', '') == 'OKX':
-                try:
-                    await asyncio.to_thread(
-                        self._exchange.setLeverage,
-                        actual_leverage,
-                        norm,
-                        {'mgnMode': margin_mode}
-                    )
-                except Exception as e:
-                    logging.error(f"Error setting leverage on OKX (will fallback to order params): {e}")
-                    return actual_leverage
+                return actual_leverage
             else:
                 await asyncio.to_thread(
                     self._exchange.setMarginMode,
