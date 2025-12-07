@@ -25,33 +25,79 @@ class TradingLogic:
         else:
             self.openai_client = OpenAI(api_key=openai_key)
         self.exchange_manager = exchange_manager
-        self.default_prompt = """
-你是一个交易信号分析器。请分析输入的消息并提取交易信号信息。
-如果找到有效的交易信号，请返回包含以下字段的JSON：
-
+        self.default_prompt = """你是一个专业的交易信号分析器（Trade Signal Parser）。请分析频道中的文本消息，并判断是否包含新的交易信号或对已有信号的更新。输入内容分为两部分一部分是当前的文本信息一部分是当前的持仓或者委托信息，当前的持仓，格式如下：
+当前委托:
+OKX:
+BTC/USDT:USDT sell limit 量: 1.0 价: 88820.0 状态: open
+当前的委托，格式如下：
+当前委托:
+OKX:
+BTC/USDT:USDT sell limit 量: 1.0 价: 88820.0 状态: open，若没有当前持仓或者当前委托则当前为空仓状态。
+你必须严格根据以下规则输出 JSON。不得输出解释、不得输出文字，只能输出 JSON。
+如果成功提取到交易信号，你必须输出：
 {
-    "exchange": "string (BINANCE或OKX)",
-    "symbol": "string (如BTCUSDT)",
-    "action": "string (OPEN_LONG, OPEN_SHORT, 或 CLOSE)",
-    "entry_price": float或array (可以是单个价格或价格区间),
-    "take_profit_levels": [
-        {"price": float, "percentage": float}
-    ],
-    "stop_loss": float,
-    "position_size": float,
-    "leverage": integer,
-    "margin_mode": "string (cross或isolated)",
-    "confidence": float (0-1),
-    "risk_level": "string (LOW, MEDIUM, HIGH)"
+"exchange": "OKX",
+"symbol": "string（如 BTCUSDT）",
+"action": "OPEN_LONG 或 OPEN_SHORT 或 CLOSE",
+"entry_price": float 或 [float, float],
+"take_profit_levels": [
+{
+"price": float,
+"percentage": float
+}
+],
+"stop_loss": float,
+"position_size": float,
+"leverage": integer,
+"margin_mode": "cross 或 isolated",
+"confidence": float（0-1）,
+"risk_level": "LOW 或 MEDIUM 或 HIGH"
 }
 
-特别说明：
-1. 如果是区间入场，将入场价格设置为数组
-2. 多个止盈目标时，设置不同的percentage表示每个目标平仓的仓位比例
-3. 如果没有指定止损，需要基于风险控制计算一个合理的止损价格
-4. 保证risk:reward比率至少为1:1.5
+若无法提取有效信号，必须只返回：
+{}
+不能添加任何额外内容。
+【规则】
 
-如果无法提取有效信号，返回null。
+1.entry_price
+若为单价 → 使用 float
+若出现区间（如“89000-89500”）→ 使用数组 [89000, 89500]
+2.take_profit_levels
+支持多个目标
+若未给出 percentage，则自动平均分配（总和 ≤ 100）
+3.stop_loss（自动生成）
+若未提供 SL：
+必须自动生成一个满足风险回报比 RR ≥ 1:1.5 的 stop_loss
+做多：SL < entry_price
+做空：SL > entry_price
+4.confidence 自动评估
+明确价格 + 专业语气：0.7–0.9
+普通信号：0.4–0.7
+模糊不清：0.1–0.3
+5.risk_level 自动评估
+LOW：小杠杆、窄 SL
+MEDIUM：常规策略
+HIGH：宽 SL、模糊或高杠杆
+杠杆 & 仓位默认值（消息未提供时）
+6.leverage 默认：10
+position_size 默认：10.0
+margin_mode 默认：isolated
+7.频道模式（极重要）
+当前为会员频道，不是一对一频道：
+同一时间只能存在一笔活跃交易。
+若收到新的开仓信号 → 自动视为新订单并覆盖旧订单
+若消息表示修改 TP/SL → 输出更新后的订单 JSON
+若消息表示已平仓 → 输出 action="CLOSE"
+8.无效内容必须返回 {}
+如：随意聊天、市场观点、没有价格、没有方向、模糊内容等。
+注意结合当前持仓和当前委托的信息，捕捉订单取消，止盈止损点位修改，市价平仓等信息。消息中出现“恭喜”字样为盈利出局消息，根据消息内容进行全部止盈或者部分止盈，修改止盈止损点位等。
+
+【输出要求】
+只能输出 JSON
+禁止包含任何解释
+JSON 字段必须完整
+禁止输出 null
+允许用推算或默认值补全缺失字段
 """
 
     def _validate_json_data(self, data: Dict[str, Any]) -> bool:
