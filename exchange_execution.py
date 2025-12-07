@@ -808,7 +808,7 @@ class ExchangeClient(ABC):
                     except Exception:
                         ct = 1.0
                 contracts_raw = (usdt_amount * actual_leverage) / (price * ct)
-                formatted_quantity = math.floor(contracts_raw)
+                formatted_quantity = max(1, math.floor(contracts_raw))
                 # if formatted_quantity < 1:
                 #     raise OrderException("Amount too small to buy minimum 1 contract with given budget")
                 # formatted_quantity = max(1, math.floor(contracts_raw))
@@ -817,9 +817,8 @@ class ExchangeClient(ABC):
                     if min_qty == 0:
                         mkt = await asyncio.to_thread(self._exchange.market, self._normalize_symbol(symbol))
                         min_qty = float(mkt.get('info', {}).get('minSz') or 0)
-                    # if min_qty and formatted_quantity < min_qty:
-                    #     raise OrderException(f"Amount {formatted_quantity} is below exchange min amount {min_qty}")
-                    #     formatted_quantity = int(max(1, math.floor(min_qty)))
+                    if min_qty and formatted_quantity < min_qty:
+                        formatted_quantity = int(max(1, math.floor(min_qty)))
                 except Exception:
                     pass
                 notional_calc = formatted_quantity * price * ct
@@ -840,7 +839,7 @@ class ExchangeClient(ABC):
                 raw_quantity = quantity
                 notional_value_calc = formatted_quantity * price
             if actual_value > usdt_amount:
-                raise OrderException(f"Insufficient budget: initial margin {actual_value:.2f} exceeds {usdt_amount:.2f}")
+                logging.warning(f"Insufficient budget: initial margin {actual_value:.2f} exceeds {usdt_amount:.2f}; proceeding with minimum size")
 
             logging.info(f"""
     Amount Conversion Details:
