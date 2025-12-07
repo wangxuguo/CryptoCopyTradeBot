@@ -261,10 +261,8 @@ class TradingLogic:
                     entry_zones=entry_zones if entry_zones else None,  # 可以是None
                     take_profit_levels=take_profit_levels if take_profit_levels else None,
                     stop_loss=stop_loss,
-                    # position_size=float(data.get('position_size', 50.0)),
-                    position_size=50.0,
-                    # leverage=int(data.get('leverage', 10)),
-                    leverage=3,
+                    position_size=float(data.get('position_size', 50.0)),
+                    leverage=int(data.get('leverage', 10)),
                     margin_mode=data.get('margin_mode', 'cross'),
                     confidence=float(data.get('confidence', 0.8)),
                     risk_level=data.get('risk_level', 'MEDIUM'),

@@ -322,6 +322,7 @@ class MarketInfo:
 
             precision = market.get('precision', {})
             limits = market.get('limits', {})
+            info = market.get('info', {})
             
             return MarketInfo(
                 symbol=market['symbol'],
@@ -329,10 +330,16 @@ class MarketInfo:
                 quote=market.get('quote', ''),
                 price_precision=int(precision.get('price', 8)),
                 amount_precision=int(precision.get('amount', 8)),
-                min_amount=safe_float(limits.get('amount', {}).get('min')),
+                min_amount=(
+                    safe_float(limits.get('amount', {}).get('min'))
+                    if limits.get('amount', {}) else safe_float(info.get('minSz'))
+                ),
                 min_cost=safe_float(limits.get('cost', {}).get('min')),
-                market_type=market.get('type', 'spot'),
-                contract_size=safe_float(market.get('contractSize'), 1.0),
+                market_type=market.get('type', 'swap' if info.get('instType') == 'SWAP' else 'spot'),
+                contract_size=(
+                    safe_float(market.get('contractSize'), 0.0) or
+                    safe_float(info.get('ctVal'), 1.0)
+                ),
                 last_price=safe_float(ticker.get('last')) if ticker else None,
                 mark_price=safe_float(ticker.get('mark')) if ticker else None,
                 index_price=safe_float(ticker.get('index')) if ticker else None
@@ -792,13 +799,23 @@ class ExchangeClient(ABC):
             
             is_contract = (market_info.amount_precision == 0)
             if is_contract:
-                ct = max(1e-12, float(market_info.contract_size or 1.0))
+                ct = float(market_info.contract_size or 0.0)
+                if ct <= 0:
+                    try:
+                        mkt = await asyncio.to_thread(self._exchange.market, self._normalize_symbol(symbol))
+                        info = mkt.get('info', {})
+                        ct = float(info.get('ctVal') or 1.0)
+                    except Exception:
+                        ct = 1.0
                 contracts_raw = (usdt_amount * actual_leverage) / (price * ct)
                 formatted_quantity = math.floor(contracts_raw)
                 if formatted_quantity < 1:
                     raise OrderException("Amount too small to buy minimum 1 contract with given budget")
                 try:
                     min_qty = market_info.min_amount or 0
+                    if min_qty == 0:
+                        mkt = await asyncio.to_thread(self._exchange.market, self._normalize_symbol(symbol))
+                        min_qty = float(mkt.get('info', {}).get('minSz') or 0)
                     if min_qty and formatted_quantity < min_qty:
                         raise OrderException(f"Amount {formatted_quantity} is below exchange min amount {min_qty}")
                 except Exception:
