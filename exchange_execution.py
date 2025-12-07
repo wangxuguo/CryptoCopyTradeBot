@@ -708,12 +708,16 @@ class ExchangeClient(ABC):
             
             norm = self._normalize_symbol(symbol)
             if getattr(self, 'exchange_name', '') == 'OKX':
-                await asyncio.to_thread(
-                    self._exchange.setLeverage,
-                    actual_leverage,
-                    norm,
-                    {'mgnMode': margin_mode}
-                )
+                try:
+                    await asyncio.to_thread(
+                        self._exchange.setLeverage,
+                        actual_leverage,
+                        norm,
+                        {'mgnMode': margin_mode}
+                    )
+                except Exception as e:
+                    logging.error(f"Error setting leverage on OKX (will fallback to order params): {e}")
+                    return actual_leverage
             else:
                 await asyncio.to_thread(
                     self._exchange.setMarginMode,
@@ -823,6 +827,10 @@ class ExchangeClient(ABC):
                 'side': order.side.lower(),
                 'amount': quantity,  # 币的数量(已包含杠杆)
             }
+
+            if getattr(self, 'exchange_name', '') == 'OKX':
+                params['tdMode'] = order.margin_mode  # 'cross' 或 'isolated'
+                params['lever'] = actual_leverage
 
             if order.order_type == OrderType.LIMIT:
                 if not order.price:

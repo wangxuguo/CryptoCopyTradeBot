@@ -105,6 +105,25 @@ class TradingLogic:
                 'leverage': 10,
                 'confidence': 0.8
             }
+            '''
+            {
+              "exchange": "OKX",
+              "symbol": "BTCUSDT",
+              "action": "OPEN_SHORT",
+              "entry_price": 89165.0,
+              "take_profit_levels": [
+                {
+                  "price": 86600.0,
+                  "percentage": 100.0
+                }
+              ],
+              "stop_loss": 91600.0,
+              "position_size": null,
+              "leverage": null,
+              "margin_mode": null,
+              "confidence": 0.7,
+              "risk_level": "MEDIUM"
+            }'''
             for field, default in numeric_fields.items():
                 if field in data:
                     try:
