@@ -809,15 +809,14 @@ class ExchangeClient(ABC):
                         ct = 1.0
                 contracts_raw = (usdt_amount * actual_leverage) / (price * ct)
                 formatted_quantity = math.floor(contracts_raw)
-                if formatted_quantity < 1:
-                    raise OrderException("Amount too small to buy minimum 1 contract with given budget")
+                # if formatted_quantity < 1:
+                #     raise OrderException("Amount too small to buy minimum 1 contract with given budget")
                 # formatted_quantity = max(1, math.floor(contracts_raw))
                 try:
                     min_qty = market_info.min_amount or 0
                     if min_qty == 0:
                         mkt = await asyncio.to_thread(self._exchange.market, self._normalize_symbol(symbol))
                         min_qty = float(mkt.get('info', {}).get('minSz') or 0)
-                        raise OrderException(f"Amount {formatted_quantity} is below exchange min amount {min_qty}")
                     # if min_qty and formatted_quantity < min_qty:
                     #     raise OrderException(f"Amount {formatted_quantity} is below exchange min amount {min_qty}")
                     #     formatted_quantity = int(max(1, math.floor(min_qty)))
