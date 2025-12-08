@@ -495,17 +495,26 @@ class ExchangeClient(ABC):
             body['lever'] = str(params['lever'])
         if 'clOrdId' in params:
             body['clOrdId'] = params['clOrdId']
-        # Inline TP/SL attachment when provided
+        # Attach TP/SL via attachAlgoOrds when provided
         tp_px = params.get('tpTriggerPx') or params.get('takeProfitPrice')
         sl_px = params.get('slTriggerPx') or params.get('stopLossPrice')
+        attach_list = []
         if tp_px is not None:
-            body['tpTriggerPx'] = str(tp_px)
-            body['tpOrdPx'] = '-1'
-            body['tpTriggerPxType'] = 'last'
+            attach_list.append({
+                'algoOrdType': 'tp',
+                'tpTriggerPx': str(tp_px),
+                'tpOrdPx': '-1',
+                'tpTriggerPxType': 'last'
+            })
         if sl_px is not None:
-            body['slTriggerPx'] = str(sl_px)
-            body['slOrdPx'] = '-1'
-            body['slTriggerPxType'] = 'last'
+            attach_list.append({
+                'algoOrdType': 'sl',
+                'slTriggerPx': str(sl_px),
+                'slOrdPx': '-1',
+                'slTriggerPxType': 'last'
+            })
+        if attach_list:
+            body['attachAlgoOrds'] = attach_list
         return await self._okx_request('/api/v5/trade/order', 'POST', body)
 
     async def _okx_amend_order(self, symbol: str, ord_id: Optional[str], cl_ord_id: Optional[str], new_px: Optional[float]) -> Dict[str, Any]:
@@ -1675,23 +1684,27 @@ class ExchangeManager:
                             pass
                         # Attach TP/SL only after position exists
                         try:
-                            positions = await exchange.get_positions(signal.symbol)
-                            if positions:
-                                pos = positions[0]
-                                attached = await exchange.attach_tp_sl(
-                                    signal.symbol,
-                                    OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
-                                    pos.size,
-                                    pos.margin_mode.value if hasattr(pos.margin_mode, 'value') else str(pos.margin_mode),
-                                    tp_price,
-                                    sl_price
-                                )
-                                if attached:
-                                    logging.info("Attached TP/SL for zone order (position confirmed)")
-                                else:
-                                    logging.warning("Failed to attach TP/SL for zone order")
+                            inline_set = bool(order.extra_params.get('tpTriggerPx') or order.extra_params.get('slTriggerPx'))
+                            if getattr(exchange, 'exchange_name', '') == 'OKX' and inline_set:
+                                logging.info("Skip attach_tp_sl: TP/SL attached via attachAlgoOrds")
                             else:
-                                logging.info("Skipped TP/SL attach: no open position yet (inline TP/SL applied if supported)")
+                                positions = await exchange.get_positions(signal.symbol)
+                                if positions:
+                                    pos = positions[0]
+                                    attached = await exchange.attach_tp_sl(
+                                        signal.symbol,
+                                        OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
+                                        pos.size,
+                                        pos.margin_mode.value if hasattr(pos.margin_mode, 'value') else str(pos.margin_mode),
+                                        tp_price,
+                                        sl_price
+                                    )
+                                    if attached:
+                                        logging.info("Attached TP/SL for zone order (position confirmed)")
+                                    else:
+                                        logging.warning("Failed to attach TP/SL for zone order")
+                                else:
+                                    logging.info("Skipped TP/SL attach: no open position yet (inline TP/SL applied if supported)")
                         except Exception as e:
                             logging.error(f"Error attaching TP/SL: {e}")
                     else:
@@ -1741,23 +1754,27 @@ class ExchangeManager:
                         pass
                     # Attach TP/SL only after position exists
                     try:
-                        positions = await exchange.get_positions(signal.symbol)
-                        if positions:
-                            pos = positions[0]
-                            attached = await exchange.attach_tp_sl(
-                                signal.symbol,
-                                OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
-                                pos.size,
-                                pos.margin_mode.value if hasattr(pos.margin_mode, 'value') else str(pos.margin_mode),
-                                tp_price,
-                                sl_price
-                            )
-                            if attached:
-                                logging.info("Attached TP/SL for entry order (position confirmed)")
-                            else:
-                                logging.warning("Failed to attach TP/SL for entry order")
+                        inline_set = bool(order.extra_params.get('tpTriggerPx') or order.extra_params.get('slTriggerPx'))
+                        if getattr(exchange, 'exchange_name', '') == 'OKX' and inline_set:
+                            logging.info("Skip attach_tp_sl: TP/SL attached via attachAlgoOrds")
                         else:
-                            logging.info("Skipped TP/SL attach: no open position yet (inline TP/SL applied if supported)")
+                            positions = await exchange.get_positions(signal.symbol)
+                            if positions:
+                                pos = positions[0]
+                                attached = await exchange.attach_tp_sl(
+                                    signal.symbol,
+                                    OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
+                                    pos.size,
+                                    pos.margin_mode.value if hasattr(pos.margin_mode, 'value') else str(pos.margin_mode),
+                                    tp_price,
+                                    sl_price
+                                )
+                                if attached:
+                                    logging.info("Attached TP/SL for entry order (position confirmed)")
+                                else:
+                                    logging.warning("Failed to attach TP/SL for entry order")
+                            else:
+                                logging.info("Skipped TP/SL attach: no open position yet (inline TP/SL applied if supported)")
                     except Exception as e:
                         logging.error(f"Error attaching TP/SL: {e}")
                 return result
