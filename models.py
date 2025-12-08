@@ -141,13 +141,11 @@ class TradingSignal:
         """验证信号是否有效"""
         if not all([self.exchange, self.symbol, self.action]):
             return False
-            
-        if not self.entry_zones and not self.entry_price:
+        # UPDATE 操作允许没有入场价格/区间，仅更新委托或持仓的TP/SL
+        if self.action != 'UPDATE' and not self.entry_zones and not self.entry_price:
             return False
-            
-        if self.action not in ['OPEN_LONG', 'OPEN_SHORT', 'CLOSE']:
+        if self.action not in ['OPEN_LONG', 'OPEN_SHORT', 'CLOSE', 'UPDATE']:
             return False
-            
         return True
 
 @dataclass

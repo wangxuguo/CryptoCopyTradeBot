@@ -508,6 +508,33 @@ class ExchangeClient(ABC):
             body['slTriggerPxType'] = 'last'
         return await self._okx_request('/api/v5/trade/order', 'POST', body)
 
+    async def _okx_amend_order(self, symbol: str, ord_id: Optional[str], cl_ord_id: Optional[str], new_px: Optional[float]) -> Dict[str, Any]:
+        try:
+            market = await asyncio.to_thread(self._exchange.market, symbol)
+            inst_id = market.get('id')
+            body: Dict[str, Any] = {
+                'instId': inst_id,
+            }
+            if ord_id:
+                body['ordId'] = str(ord_id)
+            if cl_ord_id:
+                body['clOrdId'] = str(cl_ord_id)
+            if new_px is not None:
+                limits = await self._okx_get_price_limit(symbol)
+                px = float(new_px)
+                if limits:
+                    max_buy = limits.get('max_buy')
+                    min_sell = limits.get('min_sell')
+                    if max_buy is not None and px > max_buy:
+                        px = max_buy
+                    if min_sell is not None and px < min_sell:
+                        px = min_sell
+                body['newPx'] = str(px)
+            return await self._okx_request('/api/v5/trade/amend-order', 'POST', body)
+        except Exception as e:
+            logging.error(f"Error amending OKX order: {e}")
+            return {'code': '1', 'msg': str(e)}
+
     async def _okx_get_price_limit(self, symbol: str) -> Optional[Dict[str, float]]:
         try:
             market = await asyncio.to_thread(self._exchange.market, symbol)
@@ -530,6 +557,21 @@ class ExchangeClient(ABC):
                                 pos_side: Optional[str], tp_price: Optional[float], sl_price: Optional[float]) -> Dict[str, Any]:
         market = await asyncio.to_thread(self._exchange.market, symbol)
         inst_id = market.get('id')
+        limits = await self._okx_get_price_limit(symbol)
+        def clamp(px: Optional[float]) -> Optional[float]:
+            if px is None:
+                return None
+            v = float(px)
+            if limits:
+                max_buy = limits.get('max_buy')
+                min_sell = limits.get('min_sell')
+                if side_close.lower() == 'buy' and max_buy is not None and v > max_buy:
+                    v = max_buy
+                if side_close.lower() == 'sell' and min_sell is not None and v < min_sell:
+                    v = min_sell
+            return v
+        tp_price = clamp(tp_price)
+        sl_price = clamp(sl_price)
         body: Dict[str, Any] = {
             'instId': inst_id,
             'side': side_close.lower(),
@@ -1496,6 +1538,87 @@ class ExchangeManager:
                     error_message=f"Exchange {signal.exchange} not configured"
                 )
 
+            # Handle CLOSE: only reduce existing position, do not create new entry orders
+            if signal.action == 'CLOSE':
+                try:
+                    positions = await exchange.get_positions(signal.symbol)
+                    if not positions:
+                        logging.info(f"Ignore CLOSE: no open position for {signal.symbol}")
+                        return OrderResult(success=False, error_message="No open position to close")
+                    position = positions[0]
+                    order = OrderParams(
+                        symbol=signal.symbol,
+                        side=OrderSide.SELL if position.side == PositionSide.LONG else OrderSide.BUY,
+                        order_type=OrderType.MARKET,
+                        amount=position.size,
+                        reduce_only=True,
+                        extra_params={}
+                    )
+                    return await exchange.create_order(order)
+                except Exception as e:
+                    logging.error(f"Error handling CLOSE action: {e}")
+                    return OrderResult(success=False, error_message=str(e))
+
+            # UPDATE: amend open orders price and TP/SL, or modify position TP/SL
+            if signal.action == 'UPDATE':
+                try:
+                    open_orders = await exchange.get_open_orders(signal.symbol)
+                    updated_any = False
+                    tp_px = None
+                    if signal.take_profit_levels:
+                        try:
+                            tp_px = signal.take_profit_levels[0].price
+                        except Exception:
+                            tp_px = None
+                    sl_px = signal.stop_loss if signal.stop_loss and signal.stop_loss > 0 else None
+                    for oi in open_orders:
+                        if not oi or oi.type.lower() != 'limit':
+                            continue
+                        new_price = signal.entry_price if signal.entry_price else oi.price
+                        if getattr(exchange, 'exchange_name', '') == 'OKX':
+                            raw = await exchange._okx_amend_order(exchange._normalize_symbol(oi.symbol), oi.id, None, new_price)
+                            if str(raw.get('code')) == '0':
+                                updated_any = True
+                                if tp_px or sl_px:
+                                    try:
+                                        await exchange.attach_tp_sl(oi.symbol, oi.side, oi.amount, signal.margin_mode or 'cross', tp_px, sl_px)
+                                    except Exception as e:
+                                        logging.warning(f"Failed to update TP/SL for amended order: {e}")
+                            else:
+                                logging.warning(f"OKX amend failed: {raw}")
+                        else:
+                            try:
+                                await exchange.cancel_order(oi.id, oi.symbol)
+                                price_use = new_price or oi.price
+                                leverage_use = signal.leverage or 10
+                                usdt_amount = max(1.0, (oi.amount * (price_use or 0.0)) / max(1, leverage_use))
+                                order = OrderParams(
+                                    symbol=oi.symbol,
+                                    side=oi.side,
+                                    order_type=OrderType.LIMIT,
+                                    amount=usdt_amount,
+                                    price=price_use,
+                                    leverage=leverage_use,
+                                    margin_mode=signal.margin_mode or 'cross',
+                                    extra_params={}
+                                )
+                                res = await exchange.create_order(order)
+                                updated_any = updated_any or res.success
+                                if res.success and (tp_px or sl_px):
+                                    try:
+                                        await exchange.attach_tp_sl(oi.symbol, oi.side, res.executed_amount or oi.amount, signal.margin_mode or 'cross', tp_px, sl_px)
+                                    except Exception as e:
+                                        logging.warning(f"Failed to attach TP/SL after recreate: {e}")
+                            except Exception as e:
+                                logging.warning(f"Fallback amend failed: {e}")
+                    if updated_any:
+                        return OrderResult(success=True)
+                    ok = await self.modify_position(signal.exchange, signal.symbol, stop_loss=sl_px, take_profit=tp_px)
+                    return OrderResult(success=ok, error_message=None if ok else "No open orders; position update failed")
+                except Exception as e:
+                    logging.error(f"Error executing UPDATE: {e}")
+                    return OrderResult(success=False, error_message=str(e))
+
             if signal.entry_zones:
                 results = []
                 total_amount = signal.position_size
@@ -1511,6 +1634,15 @@ class ExchangeManager:
                         USDT Amount: {zone_amount}
                         """)
 
+                    # Prepare TP/SL
+                    tp_price_sig = None
+                    if signal.take_profit_levels:
+                        try:
+                            tp_price_sig = signal.take_profit_levels[0].price
+                        except Exception:
+                            tp_price_sig = None
+                    sl_price_sig = signal.stop_loss
+
                     order = OrderParams(
                         symbol=signal.symbol,
                         side=OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
@@ -1519,7 +1651,10 @@ class ExchangeManager:
                         price=zone.price,  # 使用区间价格
                         leverage=signal.leverage,
                         margin_mode=signal.margin_mode,
-                        extra_params={}
+                        extra_params={
+                            'tpTriggerPx': tp_price_sig if tp_price_sig else None,
+                            'slTriggerPx': sl_price_sig if sl_price_sig else None,
+                        }
                     )
 
                     result = await exchange.create_order(order)
@@ -1538,19 +1673,25 @@ class ExchangeManager:
                                 sl_price = order.extra_params.get('slTriggerPx') or order.extra_params.get('stopLossPrice') or sl_price
                         except Exception:
                             pass
+                        # Attach TP/SL only after position exists
                         try:
-                            attached = await exchange.attach_tp_sl(
-                                signal.symbol,
-                                OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
-                                result.executed_amount,
-                                signal.margin_mode,
-                                tp_price,
-                                sl_price
-                            )
-                            if attached:
-                                logging.info("Attached TP/SL for zone order")
+                            positions = await exchange.get_positions(signal.symbol)
+                            if positions:
+                                pos = positions[0]
+                                attached = await exchange.attach_tp_sl(
+                                    signal.symbol,
+                                    OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
+                                    pos.size,
+                                    pos.margin_mode.value if hasattr(pos.margin_mode, 'value') else str(pos.margin_mode),
+                                    tp_price,
+                                    sl_price
+                                )
+                                if attached:
+                                    logging.info("Attached TP/SL for zone order (position confirmed)")
+                                else:
+                                    logging.warning("Failed to attach TP/SL for zone order")
                             else:
-                                logging.warning("Failed to attach TP/SL for zone order")
+                                logging.info("Skipped TP/SL attach: no open position yet (inline TP/SL applied if supported)")
                         except Exception as e:
                             logging.error(f"Error attaching TP/SL: {e}")
                     else:
@@ -1563,6 +1704,15 @@ class ExchangeManager:
                 )
             else:
                 # Single entry price or market order
+                # Prepare TP/SL
+                tp_price_sig = None
+                if signal.take_profit_levels:
+                    try:
+                        tp_price_sig = signal.take_profit_levels[0].price
+                    except Exception:
+                        tp_price_sig = None
+                sl_price_sig = signal.stop_loss
+
                 order = OrderParams(
                     symbol=signal.symbol,
                     side=OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
@@ -1571,7 +1721,10 @@ class ExchangeManager:
                     price=signal.entry_price,  # 可能为None（市价单）
                     leverage=signal.leverage,
                     margin_mode=signal.margin_mode,
-                    extra_params={}
+                    extra_params={
+                        'tpTriggerPx': tp_price_sig if tp_price_sig else None,
+                        'slTriggerPx': sl_price_sig if sl_price_sig else None,
+                    }
                 )
 
                 result = await exchange.create_order(order)
@@ -1586,19 +1739,25 @@ class ExchangeManager:
                             sl_price = order.extra_params.get('slTriggerPx') or order.extra_params.get('stopLossPrice') or sl_price
                     except Exception:
                         pass
+                    # Attach TP/SL only after position exists
                     try:
-                        attached = await exchange.attach_tp_sl(
-                            signal.symbol,
-                            OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
-                            result.executed_amount,
-                            signal.margin_mode,
-                            tp_price,
-                            sl_price
-                        )
-                        if attached:
-                            logging.info("Attached TP/SL for entry order")
+                        positions = await exchange.get_positions(signal.symbol)
+                        if positions:
+                            pos = positions[0]
+                            attached = await exchange.attach_tp_sl(
+                                signal.symbol,
+                                OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
+                                pos.size,
+                                pos.margin_mode.value if hasattr(pos.margin_mode, 'value') else str(pos.margin_mode),
+                                tp_price,
+                                sl_price
+                            )
+                            if attached:
+                                logging.info("Attached TP/SL for entry order (position confirmed)")
+                            else:
+                                logging.warning("Failed to attach TP/SL for entry order")
                         else:
-                            logging.warning("Failed to attach TP/SL for entry order")
+                            logging.info("Skipped TP/SL attach: no open position yet (inline TP/SL applied if supported)")
                     except Exception as e:
                         logging.error(f"Error attaching TP/SL: {e}")
                 return result
@@ -1755,9 +1914,19 @@ class ExchangeManager:
                 return False
                 
             position = positions[0]
+            # OKX: use algo TP/SL update
+            if getattr(exchange_client, 'exchange_name', '') == 'OKX':
+                side_open = OrderSide.BUY if position.side == PositionSide.LONG else OrderSide.SELL
+                return await exchange_client.attach_tp_sl(
+                    symbol,
+                    side_open,
+                    position.size,
+                    position.margin_mode.value if hasattr(position.margin_mode, 'value') else str(position.margin_mode),
+                    take_profit,
+                    stop_loss
+                )
+            # Other exchanges: fallback to stop/take-profit market orders
             success = True
-            
-            # Modify stop loss if provided
             if stop_loss:
                 order = OrderParams(
                     symbol=symbol,
@@ -1769,8 +1938,6 @@ class ExchangeManager:
                 )
                 result = await exchange_client.create_order(order)
                 success = success and result.success
-                
-            # Modify take profit if provided
             if take_profit:
                 order = OrderParams(
                     symbol=symbol,
@@ -1782,7 +1949,6 @@ class ExchangeManager:
                 )
                 result = await exchange_client.create_order(order)
                 success = success and result.success
-                
             return success
             
         except Exception as e:
