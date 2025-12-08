@@ -250,11 +250,21 @@ JSON 字段必须完整
                         logging.error(f"Error creating entry zone: {e}")
                         continue
                 logging.info(f"Created {len(entry_zones)} entry zones")
-            # 检查是否有单一入场价格
+            # 检查是否有单一入场价格或价格列表
             elif 'entry_price' in data and data['entry_price'] is not None:
                 try:
-                    entry_price = float(data['entry_price'])
-                    logging.info(f"Using single entry price: {entry_price}")
+                    if isinstance(data['entry_price'], list):
+                        prices = [float(p) for p in data['entry_price'] if p is not None]
+                        if not prices:
+                            logging.error("Empty entry_price list")
+                            return None
+                        pct = 1.0 / len(prices)
+                        for p in prices:
+                            entry_zones.append(EntryZone(price=p, percentage=pct))
+                        logging.info(f"Created {len(entry_zones)} entry zones from entry_price list")
+                    else:
+                        entry_price = float(data['entry_price'])
+                        logging.info(f"Using single entry price: {entry_price}")
                 except (TypeError, ValueError) as e:
                     logging.error(f"Error converting entry price: {e}")
                     return None

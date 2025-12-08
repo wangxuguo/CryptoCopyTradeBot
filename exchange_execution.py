@@ -8,6 +8,7 @@ import math
 import hmac
 import hashlib
 import base64
+from urllib.parse import urlencode
 import time
 import logging
 from abc import ABC, abstractmethod
@@ -446,10 +447,13 @@ class ExchangeClient(ABC):
             return f"{base}/{quote}:USDT"
         return f"{base}/{quote}"
 
-    async def _okx_request(self, path: str, method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _okx_request(self, path: str, method: str, payload: Optional[Dict[str, Any]] = None, query: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         ts = datetime.utcnow().isoformat(timespec='milliseconds') + 'Z'
-        body = json.dumps(payload, separators=(',', ':'))
-        prehash = f"{ts}{method}{path}{body}"
+        m = method.upper()
+        q = urlencode(query or {})
+        qs = f"?{q}" if q else ""
+        body = "" if m == 'GET' else json.dumps(payload or {}, separators=(',', ':'))
+        prehash = f"{ts}{m}{path}{qs}{body}"
         sign = hmac.new(self.credentials.api_secret.encode(), prehash.encode(), hashlib.sha256).digest()
         sign_b64 = base64.b64encode(sign).decode()
         headers = {
@@ -461,10 +465,15 @@ class ExchangeClient(ABC):
         }
         if getattr(self.credentials, 'testnet', False):
             headers['x-simulated-trading'] = '1'
-        url = f"https://www.okx.com{path}"
-        async with self._session.post(url, headers=headers, data=body) as resp:
-            data = await resp.json()
-            return data
+        url = f"https://www.okx.com{path}{qs}"
+        if m == 'GET':
+            async with self._session.get(url, headers=headers) as resp:
+                data = await resp.json()
+                return data
+        else:
+            async with self._session.post(url, headers=headers, data=body) as resp:
+                data = await resp.json()
+                return data
 
     async def _okx_create_order(self, symbol: str, type_arg: str, side_arg: str, amount_arg: float, price_arg: Optional[float], params: Dict[str, Any]) -> Dict[str, Any]:
         market = await asyncio.to_thread(self._exchange.market, symbol)
@@ -498,6 +507,24 @@ class ExchangeClient(ABC):
             body['slOrdPx'] = '-1'
             body['slTriggerPxType'] = 'last'
         return await self._okx_request('/api/v5/trade/order', 'POST', body)
+
+    async def _okx_get_price_limit(self, symbol: str) -> Optional[Dict[str, float]]:
+        try:
+            market = await asyncio.to_thread(self._exchange.market, symbol)
+            inst_id = market.get('id')
+            raw = await self._okx_request('/api/v5/public/price-limit', 'GET', None, {'instId': inst_id})
+            if raw and str(raw.get('code')) == '0':
+                d = (raw.get('data') or [{}])[0]
+                max_buy = d.get('buyLmtPx') or d.get('buyPx') or d.get('buyLmt')
+                min_sell = d.get('sellLmtPx') or d.get('sellPx') or d.get('sellLmt')
+                return {
+                    'max_buy': float(max_buy) if max_buy is not None else None,
+                    'min_sell': float(min_sell) if min_sell is not None else None,
+                }
+            return None
+        except Exception as e:
+            logging.warning(f"Failed to fetch OKX price limit: {e}")
+            return None
 
     async def _okx_attach_tp_sl(self, symbol: str, side_close: str, amount_contracts: int, td_mode: str,
                                 pos_side: Optional[str], tp_price: Optional[float], sl_price: Optional[float]) -> Dict[str, Any]:
@@ -954,6 +981,14 @@ class ExchangeClient(ABC):
                 if not order.price:
                     raise OrderException("Price is required for limit orders")
                 price_arg = self._format_price(ccxt_symbol, order.price)
+                if getattr(self, 'exchange_name', '') == 'OKX':
+                    limits = await self._okx_get_price_limit(ccxt_symbol)
+                    if limits and side_arg == 'buy' and limits.get('max_buy') is not None and price_arg > limits['max_buy']:
+                        logging.warning(f"Limit price {price_arg} exceeds max buy {limits['max_buy']}, clamping")
+                        price_arg = limits['max_buy']
+                    if limits and side_arg == 'sell' and limits.get('min_sell') is not None and price_arg < limits['min_sell']:
+                        logging.warning(f"Limit price {price_arg} below min sell {limits['min_sell']}, clamping")
+                        price_arg = limits['min_sell']
             
             if order.stop_price:
                 params_extras['stopPrice'] = self._format_price(ccxt_symbol, order.stop_price)
