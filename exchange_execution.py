@@ -732,7 +732,8 @@ class ExchangeClient(ABC):
         try:
             # Check cache
             now = time.time()
-            cache_key = symbol or 'all'
+            norm = self._normalize_symbol(symbol) if symbol else None
+            cache_key = norm or 'all'
             if cache_key in self._position_cache:
                 if now - self._position_cache_time.get(cache_key, 0) < self.CACHE_DURATION:
                     return [self._position_cache[cache_key]]
@@ -741,7 +742,7 @@ class ExchangeClient(ABC):
             self._rate_limit()
             positions = await asyncio.to_thread(
                 self._exchange.fetchPositions,
-                [symbol] if symbol else None
+                [norm] if norm else None
             )
             
             result = []
@@ -750,8 +751,9 @@ class ExchangeClient(ABC):
                     position_info = PositionInfo.from_exchange_position(pos)
                     if position_info:
                         result.append(position_info)
-                        self._position_cache[position_info.symbol] = position_info
-                        self._position_cache_time[position_info.symbol] = now
+                        key = position_info.symbol
+                        self._position_cache[key] = position_info
+                        self._position_cache_time[key] = now
                         
             if not symbol:  # Cache all positions
                 self._position_cache['all'] = result
