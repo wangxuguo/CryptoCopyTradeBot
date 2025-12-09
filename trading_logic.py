@@ -121,7 +121,7 @@ JSON 字段必须完整
                 return False
 
             # 验证操作类型
-            if data['action'] not in ['OPEN_LONG', 'OPEN_SHORT', 'CLOSE']:
+            if data['action'] not in ['OPEN_LONG', 'OPEN_SHORT', 'CLOSE',"UPDATE"]:
                 logging.error(f"Invalid action: {data['action']}")
                 return False
 
@@ -269,8 +269,8 @@ JSON 字段必须完整
                     logging.error(f"Error converting entry price: {e}")
                     return None
 
-            # 如果既没有入场区间也没有入场价格，返回None
-            if not entry_zones and entry_price is None:
+            # UPDATE 动作允许没有入场区间/价格
+            if not entry_zones and entry_price is None and data.get('action') != 'UPDATE':
                 logging.error("No valid entry price or zones found")
                 return None
 
