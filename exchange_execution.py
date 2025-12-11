@@ -1499,15 +1499,17 @@ class ExchangeManager:
             except Exception as e:
                 logging.error(f"Error initializing Binance: {e}")
             
-            # Initialize OKX if configured
-            if self.config.exchange.okx_testnet_api_key:
-                try:
-                    logging.info("Initializing OKX...")
+            # Initialize OKX according to USE_TESTNET and available keys
+            try:
+                okx_cfg = self.config.get_exchange_config('OKX')
+                if okx_cfg and okx_cfg.get('api_key'):
+                    logging.info(f"Initializing OKX (testnet={okx_cfg.get('testnet')})...")
+
                     okx_credentials = ExchangeCredentials(
-                        api_key=self.config.exchange.okx_testnet_api_key,
-                        api_secret=self.config.exchange.okx_testnet_api_secret,
-                        passphrase=self.config.exchange.okx_testnet_passphrase,
-                        testnet=self.config.trading.use_testnet
+                        api_key=okx_cfg.get('api_key', ''),
+                        api_secret=okx_cfg.get('api_secret', ''),
+                        passphrase=okx_cfg.get('passphrase', ''),
+                        testnet=bool(okx_cfg.get('testnet', False))
                     )
                     okx_client = OKXClient(okx_credentials)
                     if await okx_client.initialize():
@@ -1516,8 +1518,14 @@ class ExchangeManager:
                         logging.info("OKX initialized successfully")
                     else:
                         logging.error("Failed to initialize OKX")
-                except Exception as e:
-                    logging.error(f"Error initializing OKX: {e}")
+                else:
+                    logging.warning(
+                        "%s but %s not set; skipping OKX",
+                        "USE_TESTNET is true" if self.config.trading.use_testnet else "USE_TESTNET is false",
+                        "OKX_TESTNET_API_KEY" if self.config.trading.use_testnet else "OKX_API_KEY"
+                    )
+            except Exception as e:
+                logging.error(f"Error initializing OKX: {e}")
 
             if not success:
                 logging.error("Failed to initialize any exchanges")

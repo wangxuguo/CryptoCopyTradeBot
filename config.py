@@ -60,7 +60,7 @@ class ExchangeConfig:
 class TradingConfig:
     """交易配置"""
     auto_trade_enabled: bool = False
-    use_testnet: bool = True
+    use_testnet: bool = False
     default_position_size: float = 50.0
     default_leverage: int = 50
     max_leverage: int = 50
