@@ -413,7 +413,7 @@ JSON 字段必须完整
             open_orders = self.exchange_manager.get_open_orders()
             if open_orders:
                 cleaned_message += f"\n\n【当前持仓/委托】\n{open_orders}"
-            logging.info(f"Using prompt:\n{'-'*40}\n{prompt}\n{'-'*40}")
+            # logging.info(f"Using prompt:\n{'-'*40}\n{prompt}\n{'-'*40}")
             
             response = self.openai_client.chat.completions.create(
                 model="gpt-3.5-turbo",

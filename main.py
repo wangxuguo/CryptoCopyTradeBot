@@ -1666,6 +1666,8 @@ async def main():
             logging.FileHandler('bot.log')
         ]
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     
     try:
         # 初始化配置
