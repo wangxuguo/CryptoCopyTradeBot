@@ -922,8 +922,14 @@ class ExchangeClient(ABC):
             # Get max allowed leverage and adjust if needed
             leverage_info = await self.get_market_leverage_info(self._normalize_symbol(symbol))
             actual_leverage = min(leverage, leverage_info['max_leverage'])
-            
+            logging.info(f"""
+                Leverage Conversion Details:
+                Requested Leverage: {leverage}
+                Max Allowed Leverage: {leverage_info['max_leverage']}
+                Actual Leverage: {actual_leverage}
+            """)
             is_contract = (market_info.amount_precision == 0)
+            logging.info(f"""is_contract: {is_contract}""")
             if is_contract:
                 ct = float(market_info.contract_size or 0.0)
                 if ct <= 0:
@@ -934,7 +940,17 @@ class ExchangeClient(ABC):
                     except Exception:
                         ct = 1.0
                 contracts_raw = (usdt_amount * actual_leverage) / (price * ct)
-                formatted_quantity = max(1, math.floor(contracts_raw))
+                # 获取当前账户余额，按1.5倍放大后计算可下单数量
+                balance = await self.get_balance()
+                available_usdt = balance.free_margin * 1.5
+                adjusted_contracts_raw = (available_usdt) / (price * ct)
+                formatted_quantity = max(1, math.floor(adjusted_contracts_raw))
+                logging.warning(f"""
+                    Adjusted Quantity: {formatted_quantity}
+                    Raw Quantity: {contracts_raw}
+                    Available USDT: {available_usdt:.2f}
+                    Required USDT: {usdt_amount * actual_leverage:.2f}
+                """)
                 # if formatted_quantity < 1:
                 #     raise OrderException("Amount too small to buy minimum 1 contract with given budget")
                 # formatted_quantity = max(1, math.floor(contracts_raw))
@@ -952,9 +968,18 @@ class ExchangeClient(ABC):
                 raw_quantity = contracts_raw
                 notional_value_calc = notional_calc
             else:
-                notional_value = usdt_amount * actual_leverage
-                quantity = notional_value / price
+                balance = await self.get_balance()
+                available_usdt = balance.free_margin * 1.5
+                adjusted_contracts_raw = (available_usdt) / (price * ct)
+                # notional_value = usdt_amount * actual_leverage
+                quantity = available_usdt / price
                 formatted_quantity = self._format_amount(self._normalize_symbol(symbol), quantity)
+                logging.info(f"""
+                    Adjusted Quantity: {formatted_quantity}
+                    Raw Quantity: {adjusted_contracts_raw}
+                    Available USDT: {available_usdt:.2f}
+                    Required USDT: {usdt_amount * actual_leverage:.2f}
+                """)
                 try:
                     min_qty = market_info.min_amount or 0
                     if min_qty and formatted_quantity < min_qty:
@@ -967,18 +992,28 @@ class ExchangeClient(ABC):
             if actual_value > usdt_amount:
                 logging.warning(f"Insufficient budget: initial margin {actual_value:.2f} exceeds {usdt_amount:.2f}; proceeding with minimum size")
 
+            '''Amount Conversion Details:
+                    USDT Amount: 180.0
+                    Price: 90300.0
+                    Leverage: 10x (max: 100x)
+                    Raw Quantity: 1.9933554817275747
+                    Formatted Quantity: 1
+                    Actual Margin: 90.3 USDT
+                    Notional Value: 903.0 USDT
+                    Min Amount: 0.01
+                    Amount Precision: 0'''
             logging.info(f"""
-    Amount Conversion Details:
-    USDT Amount: {usdt_amount}
-    Price: {price}
-    Leverage: {actual_leverage}x (max: {leverage_info['max_leverage']}x)
-    Raw Quantity: {raw_quantity}
-    Formatted Quantity: {formatted_quantity}
-    Actual Margin: {actual_value} USDT
-    Notional Value: {notional_value_calc} USDT
-    Min Amount: {market_info.min_amount if market_info else 'Unknown'}
-    Amount Precision: {market_info.amount_precision if market_info else 'Unknown'}
-    """)
+                Amount Conversion Details:
+                USDT Amount: {usdt_amount}
+                Price: {price}
+                Leverage: {actual_leverage}x (max: {leverage_info['max_leverage']}x)
+                Raw Quantity: {raw_quantity}
+                Formatted Quantity: {formatted_quantity}
+                Actual Margin: {actual_value} USDT
+                Notional Value: {notional_value_calc} USDT
+                Min Amount: {market_info.min_amount if market_info else 'Unknown'}
+                Amount Precision: {market_info.amount_precision if market_info else 'Unknown'}
+                """)
 
             return formatted_quantity, {
                 'raw_quantity': raw_quantity,
@@ -1014,14 +1049,15 @@ class ExchangeClient(ABC):
             # 设置杠杆和保证金模式
             leverage = order.leverage or 50  # 默认50倍杠杆
             actual_leverage = await self.set_leverage(ccxt_symbol, leverage, order.margin_mode)
-            
+            logging.warning(f"Set leverage to {actual_leverage}x for {order.symbol}  leverage: {leverage} margin_mode: {order.margin_mode}")
+            logging.warning(f"ccxt_symbol: {ccxt_symbol} use_price: {use_price} order.amount： {order.amount}")
             quantity, conversion_info = await self.convert_amount_to_contracts(
                 ccxt_symbol,
                 order.amount,  # USDT amount
                 use_price,
                 actual_leverage  # 使用实际设置的杠杆
             )
-
+            logging.info(f"Conversion Info: {conversion_info}  quantity: {quantity}")
             # 创建订单参数（统一方法签名 + 额外参数）
             symbol_arg = ccxt_symbol
             type_arg = order.order_type.lower()
@@ -1087,7 +1123,18 @@ class ExchangeClient(ABC):
                 Initial Margin: {conversion_info['initial_margin']} USDT
                 Notional Value: {conversion_info['notional_value']} USDT
                 """)
-
+            ''' Creating order:
+                Symbol: BTCUSDT
+                USDT Amount Intended: 180.0
+                Leverage: 10x
+                Coin Quantity: 1
+                Type: limit
+                Side: buy
+                Price: 90300.0
+                Stop Price: None
+                Margin Mode: isolated
+                Initial Margin: 90.3 USDT
+                Notional Value: 903.0 USDT'''
             # Execute order
             if getattr(self, 'exchange_name', '') == 'OKX':
                 # 自动适配账户持仓模式

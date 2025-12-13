@@ -151,25 +151,7 @@ JSON 字段必须完整
                 'leverage': 10,
                 'confidence': 0.8
             }
-            '''
-            {
-              "exchange": "OKX",
-              "symbol": "BTCUSDT",
-              "action": "OPEN_SHORT",
-              "entry_price": 89165.0,
-              "take_profit_levels": [
-                {
-                  "price": 86600.0,
-                  "percentage": 100.0
-                }
-              ],
-              "stop_loss": 91600.0,
-              "position_size": null,
-              "leverage": null,
-              "margin_mode": null,
-              "confidence": 0.7,
-              "risk_level": "MEDIUM"
-            }'''
+            
             for field, default in numeric_fields.items():
                 if field in data:
                     try:
@@ -307,6 +289,25 @@ JSON 字段必须完整
                 except (TypeError, ValueError):
                     logging.error("Invalid stop loss value")
 
+            '''{
+                "exchange": "OKX",
+                "symbol": "BTCUSDT",
+                "action": "OPEN_LONG",
+                "entry_price": 90300.0,
+                "take_profit_levels": [
+                    {
+                    "price": 92500.0,
+                    "percentage": 100.0
+                    }
+                ],
+                "stop_loss": 89000.0,
+                "position_size": 180.0,
+                "leverage": 10,
+                "margin_mode": "isolated",
+                "confidence": 0.7,
+                "risk_level": "MEDIUM"
+                }
+            '''
             # 创建信号对象
             try:
                 signal = TradingSignal(
