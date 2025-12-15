@@ -1051,12 +1051,40 @@ class ExchangeClient(ABC):
             actual_leverage = await self.set_leverage(ccxt_symbol, leverage, order.margin_mode)
             logging.warning(f"Set leverage to {actual_leverage}x for {order.symbol}  leverage: {leverage} margin_mode: {order.margin_mode}")
             logging.warning(f"ccxt_symbol: {ccxt_symbol} use_price: {use_price} order.amount： {order.amount}")
-            quantity, conversion_info = await self.convert_amount_to_contracts(
-                ccxt_symbol,
-                order.amount,  # USDT amount
-                use_price,
-                actual_leverage  # 使用实际设置的杠杆
-            )
+            use_raw_amount = bool(order.reduce_only)
+            if use_raw_amount:
+                is_contract = (market_info.amount_precision == 0)
+                if is_contract:
+                    ct = float(market_info.contract_size or 0.0)
+                    if ct <= 0:
+                        try:
+                            mkt = await asyncio.to_thread(self._exchange.market, ccxt_symbol)
+                            info = mkt.get('info', {})
+                            ct = float(info.get('ctVal') or 1.0)
+                        except Exception:
+                            ct = 1.0
+                    quantity = max(1, int(math.floor(abs(order.amount))))
+                    notional_value_calc = quantity * use_price * ct
+                    actual_value = notional_value_calc / actual_leverage
+                else:
+                    quantity = self._format_amount(ccxt_symbol, float(abs(order.amount)))
+                    notional_value_calc = quantity * use_price
+                    actual_value = notional_value_calc / actual_leverage
+                conversion_info = {
+                    'raw_quantity': order.amount,
+                    'formatted_quantity': quantity,
+                    'initial_margin': actual_value,
+                    'notional_value': notional_value_calc,
+                    'price': use_price,
+                    'leverage': actual_leverage
+                }
+            else:
+                quantity, conversion_info = await self.convert_amount_to_contracts(
+                    ccxt_symbol,
+                    order.amount,  # USDT amount
+                    use_price,
+                    actual_leverage  # 使用实际设置的杠杆
+                )
             logging.info(f"Conversion Info: {conversion_info}  quantity: {quantity}")
             # 创建订单参数（统一方法签名 + 额外参数）
             symbol_arg = ccxt_symbol
@@ -1139,11 +1167,11 @@ class ExchangeClient(ABC):
             if getattr(self, 'exchange_name', '') == 'OKX':
                 # 自动适配账户持仓模式
                 pos_mode = getattr(self, 'pos_mode', None)
-                if not params_extras.get('posSide'):
-                    if pos_mode == 'long_short':
+                if pos_mode == 'long_short':
+                    if not params_extras.get('posSide'):
                         params_extras['posSide'] = 'long' if side_arg == 'buy' else 'short'
-                    elif pos_mode == 'net':
-                        params_extras.pop('posSide', None)
+                elif pos_mode == 'net':
+                    params_extras.pop('posSide', None)
 
                 raw = await self._okx_create_order(symbol_arg, type_arg, side_arg, amount_arg, price_arg, params_extras)
                 code = str(raw.get('code'))
@@ -1618,7 +1646,11 @@ class ExchangeManager:
                         order_type=OrderType.MARKET,
                         amount=position.size,
                         reduce_only=True,
-                        extra_params={}
+                        leverage=position.leverage,
+                        margin_mode=position.margin_mode.value if hasattr(position.margin_mode, 'value') else str(position.margin_mode),
+                        extra_params={
+                            'posSide': 'long' if position.side == PositionSide.LONG else 'short'
+                        }
                     )
                     return await exchange.create_order(order)
                 except Exception as e:
@@ -1964,7 +1996,12 @@ class ExchangeManager:
                 side=OrderSide.SELL if position.side == PositionSide.LONG else OrderSide.BUY,
                 order_type=OrderType.MARKET,
                 amount=position.size,
-                reduce_only=True
+                reduce_only=True,
+                leverage=position.leverage,
+                margin_mode=position.margin_mode.value if hasattr(position.margin_mode, 'value') else str(position.margin_mode),
+                extra_params={
+                    'posSide': 'long' if position.side == PositionSide.LONG else 'short'
+                }
             )
             
             return await exchange_client.create_order(order)
