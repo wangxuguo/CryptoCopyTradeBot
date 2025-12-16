@@ -1,7 +1,6 @@
 # exchange_execution.py
 
 from enum import Enum
-import os
 import asyncio
 import json 
 import math
@@ -12,14 +11,12 @@ from urllib.parse import urlencode
 import time
 import logging
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta
-from decimal import Decimal, ROUND_DOWN
+from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple, Union
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 
 import ccxt
 import aiohttp
-from urllib.parse import urljoin
 
 from models import (
     TradingSignal,
@@ -736,7 +733,8 @@ class ExchangeClient(ABC):
             cache_key = norm or 'all'
             if cache_key in self._position_cache:
                 if now - self._position_cache_time.get(cache_key, 0) < self.CACHE_DURATION:
-                    return [self._position_cache[cache_key]]
+                    cached = self._position_cache[cache_key]
+                    return cached if isinstance(cached, list) else [cached]
                     
             # Fetch from exchange
             self._rate_limit()
@@ -876,31 +874,27 @@ class ExchangeClient(ABC):
             logging.error(f"Error getting leverage info: {e}")
             return {'max_leverage': 1, 'tiers': []}
 
-    async def set_leverage(self, symbol: str, leverage: int, margin_mode: str) -> bool:
+    async def set_leverage(self, symbol: str, leverage: int, margin_mode: str) -> int:
         """Set leverage with validation"""
         try:
-            leverage_info = await self.get_market_leverage_info(self._normalize_symbol(symbol))
-            max_leverage = leverage_info['max_leverage']
-            
-            actual_leverage = min(leverage, max_leverage)
-            
             norm = self._normalize_symbol(symbol)
             if getattr(self, 'exchange_name', '') == 'OKX':
+                try:
+                    brackets = await getattr(self, 'get_leverage_brackets')(norm, margin_mode) if hasattr(self, 'get_leverage_brackets') else []
+                except Exception:
+                    brackets = []
+                max_lev = max(int(b.get('maxLeverage', 1)) for b in brackets) if brackets else leverage
+                actual_leverage = min(leverage, max_lev)
+                logging.info(f"OKX leverage resolved: requested={leverage}, max={max_lev}, actual={actual_leverage}")
                 return actual_leverage
             else:
-                await asyncio.to_thread(
-                    self._exchange.setMarginMode,
-                    margin_mode,
-                    norm
-                )
-                await asyncio.to_thread(
-                    self._exchange.setLeverage,
-                    actual_leverage,
-                    norm
-                )
-            
-            logging.info(f"Set {margin_mode} leverage for {symbol}: requested={leverage}, actual={actual_leverage}")
-            return actual_leverage
+                leverage_info = await self.get_market_leverage_info(norm)
+                max_leverage = leverage_info['max_leverage']
+                actual_leverage = min(leverage, max_leverage)
+                await asyncio.to_thread(self._exchange.setMarginMode, margin_mode, norm)
+                await asyncio.to_thread(self._exchange.setLeverage, actual_leverage, norm)
+                logging.info(f"Set {margin_mode} leverage for {symbol}: requested={leverage}, actual={actual_leverage}")
+                return actual_leverage
             
         except Exception as e:
             logging.error(f"Error setting leverage: {e}")
@@ -919,13 +913,11 @@ class ExchangeClient(ABC):
             if not market_info:
                 raise ValueError(f"Cannot get market info for {symbol}")
 
-            # Get max allowed leverage and adjust if needed
-            leverage_info = await self.get_market_leverage_info(self._normalize_symbol(symbol))
-            actual_leverage = min(leverage, leverage_info['max_leverage'])
+            # Use provided leverage (already validated/set by set_leverage)
+            actual_leverage = max(1, int(leverage))
             logging.info(f"""
                 Leverage Conversion Details:
                 Requested Leverage: {leverage}
-                Max Allowed Leverage: {leverage_info['max_leverage']}
                 Actual Leverage: {actual_leverage}
             """)
             is_contract = (market_info.amount_precision == 0)
@@ -940,15 +932,11 @@ class ExchangeClient(ABC):
                     except Exception:
                         ct = 1.0
                 contracts_raw = (usdt_amount * actual_leverage) / (price * ct)
-                # 获取当前账户余额，按1.5倍放大后计算可下单数量
-                balance = await self.get_balance()
-                available_usdt = balance.free_margin * 1.5
-                adjusted_contracts_raw = (available_usdt) / (price * ct)
-                formatted_quantity = max(1, math.floor(adjusted_contracts_raw))
+                formatted_quantity = max(1, math.floor(contracts_raw))
                 logging.warning(f"""
                     Adjusted Quantity: {formatted_quantity}
                     Raw Quantity: {contracts_raw}
-                    Available USDT: {available_usdt:.2f}
+                    Available USDT: {usdt_amount:.2f}
                     Required USDT: {usdt_amount * actual_leverage:.2f}
                 """)
                 # if formatted_quantity < 1:
@@ -968,16 +956,12 @@ class ExchangeClient(ABC):
                 raw_quantity = contracts_raw
                 notional_value_calc = notional_calc
             else:
-                balance = await self.get_balance()
-                available_usdt = balance.free_margin * 1.5
-                adjusted_contracts_raw = (available_usdt) / (price * ct)
-                # notional_value = usdt_amount * actual_leverage
-                quantity = available_usdt / price
+                quantity = usdt_amount / price
                 formatted_quantity = self._format_amount(self._normalize_symbol(symbol), quantity)
                 logging.info(f"""
                     Adjusted Quantity: {formatted_quantity}
-                    Raw Quantity: {adjusted_contracts_raw}
-                    Available USDT: {available_usdt:.2f}
+                    Raw Quantity: {quantity}
+                    Available USDT: {usdt_amount:.2f}
                     Required USDT: {usdt_amount * actual_leverage:.2f}
                 """)
                 try:
