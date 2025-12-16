@@ -990,7 +990,7 @@ class ExchangeClient(ABC):
                 Amount Conversion Details:
                 USDT Amount: {usdt_amount}
                 Price: {price}
-                Leverage: {actual_leverage}x (max: {leverage_info['max_leverage']}x)
+                Leverage: {actual_leverage}x
                 Raw Quantity: {raw_quantity}
                 Formatted Quantity: {formatted_quantity}
                 Actual Margin: {actual_value} USDT
