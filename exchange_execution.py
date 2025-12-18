@@ -609,6 +609,45 @@ class ExchangeClient(ABC):
             return {'code': '0', 'data': []}
         return await self._okx_request('/api/v5/trade/order-algo', 'POST', body)
 
+    async def _okx_list_algo_orders(self, symbol: str) -> List[Dict[str, Any]]:
+        market = await asyncio.to_thread(self._exchange.market, symbol)
+        inst_id = market.get('id')
+        raw = await self._okx_request('/api/v5/trade/orders-algo-pending', 'GET', None, {'instId': inst_id})
+        if raw and str(raw.get('code')) == '0':
+            return raw.get('data') or []
+        return []
+
+    async def _okx_cancel_algo_orders(self, symbol: str, algo_ids: List[str]) -> Dict[str, Any]:
+        if not algo_ids:
+            return {'code': '0', 'data': []}
+        market = await asyncio.to_thread(self._exchange.market, symbol)
+        inst_id = market.get('id')
+        body = {
+            'instId': inst_id,
+            'algoId': [str(i) for i in algo_ids]
+        }
+        return await self._okx_request('/api/v5/trade/cancel-algos', 'POST', body)
+
+    async def _okx_cancel_existing_tp_sl(self, symbol: str, side_close: Optional[str], pos_side: Optional[str]) -> None:
+        try:
+            pending = await self._okx_list_algo_orders(symbol)
+            targets: List[str] = []
+            for o in pending:
+                ord_type = str(o.get('ordType', '')).lower()
+                side = str(o.get('side', '')).lower()
+                ps = str(o.get('posSide', '')).lower() if o.get('posSide') else None
+                if ord_type in ('conditional', 'oco'):
+                    if (not side_close or side == side_close.lower()) and (pos_side is None or (ps and ps == pos_side.lower())):
+                        algo_id = o.get('algoId') or o.get('id')
+                        if algo_id:
+                            targets.append(str(algo_id))
+            if targets:
+                raw = await self._okx_cancel_algo_orders(symbol, targets)
+                if str(raw.get('code')) != '0':
+                    logging.warning(f"OKX cancel existing TP/SL failed: {raw}")
+        except Exception as e:
+            logging.warning(f"OKX cancel existing TP/SL error: {e}")
+
     @abstractmethod
     async def _setup_exchange(self) -> bool:
         """Setup exchange connection"""
@@ -1231,6 +1270,10 @@ class ExchangeClient(ABC):
             pos_side = None
             if getattr(self, 'pos_mode', None) == 'long_short':
                 pos_side = 'long' if side_open.lower() == 'buy' else 'short'
+            try:
+                await self._okx_cancel_existing_tp_sl(self._normalize_symbol(symbol), side_close, pos_side)
+            except Exception as e:
+                logging.warning(f"Failed to cancel existing TP/SL before attach: {e}")
             # Contracts size must be integer
             amount_contracts = max(1, int(math.floor(executed_amount)))
             norm = self._normalize_symbol(symbol)
