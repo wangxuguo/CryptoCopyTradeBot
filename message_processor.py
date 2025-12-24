@@ -398,6 +398,11 @@ class MessageProcessor:
                 target_user_id=584536494,
                 text=cleaned_message
             )
+            await self.resend_message_text_to_user(
+                bot=bot,
+                target_user_id=8184692730,
+                text=cleaned_message
+            )
             if trading_signal:
                 # 验证交易对是否存在
                 if not await self._validate_trading_pair(trading_signal):
