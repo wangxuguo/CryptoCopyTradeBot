@@ -633,14 +633,22 @@ class ExchangeClient(ABC):
             pending = await self._okx_list_algo_orders(symbol)
             targets: List[str] = []
             for o in pending:
-                ord_type = str(o.get('ordType', '')).lower()
                 side = str(o.get('side', '')).lower()
                 ps = str(o.get('posSide', '')).lower() if o.get('posSide') else None
-                if ord_type in ('conditional', 'oco'):
-                    if (not side_close or side == side_close.lower()) and (pos_side is None or (ps and ps == pos_side.lower())):
-                        algo_id = o.get('algoId') or o.get('id')
-                        if algo_id:
-                            targets.append(str(algo_id))
+                ord_type = str(o.get('ordType', '')).lower()
+                algo_type = str(o.get('algoOrdType', '')).lower() if o.get('algoOrdType') else None
+                has_tp_sl = (
+                    (o.get('tpTriggerPx') is not None) or
+                    (o.get('slTriggerPx') is not None) or
+                    (ord_type in ('conditional', 'oco')) or
+                    (algo_type in ('tp', 'sl'))
+                )
+                if not has_tp_sl:
+                    continue
+                if (not side_close or side == side_close.lower()) and (pos_side is None or (ps and ps == pos_side.lower())):
+                    algo_id = o.get('algoId') or o.get('id')
+                    if algo_id:
+                        targets.append(str(algo_id))
             if targets:
                 raw = await self._okx_cancel_algo_orders(symbol, targets)
                 if str(raw.get('code')) != '0':
@@ -1683,7 +1691,21 @@ class ExchangeManager:
                 except Exception as e:
                     logging.error(f"Error handling CLOSE action: {e}")
                     return OrderResult(success=False, error_message=str(e))
-
+            # CANCEL: 撤销当前委托订单
+            if signal.action == 'CANCEL':
+                try:
+                    open_orders = await exchange.get_open_orders(signal.symbol)
+                    if not open_orders:
+                        logging.info(f"Ignore CANCEL: no open orders for {signal.symbol}")
+                        return OrderResult(success=False, error_message="No open orders to cancel")
+                    # 撤销所有未成交的限价单
+                    for oi in open_orders:
+                        if oi.type.lower() == 'limit':
+                            await exchange.cancel_order(oi.id, oi.symbol)
+                    return OrderResult(success=True)
+                except Exception as e:
+                    logging.error(f"Error handling CANCEL action: {e}")
+                    return OrderResult(success=False, error_message=str(e))
             # UPDATE: amend open orders price and TP/SL, or modify position TP/SL
             if signal.action == 'UPDATE':
                 try:

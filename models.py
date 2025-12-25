@@ -23,7 +23,7 @@ class TakeProfitLevel:
 class TradingSignal:
     exchange: str
     symbol: str
-    action: str  # OPEN_LONG, OPEN_SHORT, CLOSE
+    action: str  # OPEN_LONG, OPEN_SHORT, CLOSE, UPDATE, CANCEL
     entry_price: Optional[float] = None
     take_profit: Optional[float] = None
     stop_loss: Optional[float] = None
