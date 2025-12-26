@@ -1078,10 +1078,11 @@ class ExchangeClient(ABC):
             use_price = order.price if (order.order_type == OrderType.LIMIT and order.price) else market_info.last_price
             
             # 设置杠杆和保证金模式
-            leverage = order.leverage or 50  # 默认50倍杠杆
+            leverage = order.leverage or 3  # 默认3倍杠杆
             actual_leverage = await self.set_leverage(ccxt_symbol, leverage, order.margin_mode)
             logging.warning(f"Set leverage to {actual_leverage}x for {order.symbol}  leverage: {leverage} margin_mode: {order.margin_mode}")
             logging.warning(f"ccxt_symbol: {ccxt_symbol} use_price: {use_price} order.amount： {order.amount}")
+            logging.warning(f"order.reduce_only: {order.reduce_only} order.extra_params: {order.extra_params} order: {order}")
             use_raw_amount = bool(order.reduce_only)
             if use_raw_amount:
                 is_contract = (market_info.amount_precision == 0)
@@ -1674,20 +1675,43 @@ class ExchangeManager:
                     if not positions:
                         logging.info(f"Ignore CLOSE: no open position for {signal.symbol}")
                         return OrderResult(success=False, error_message="No open position to close")
-                    position = positions[0]
-                    order = OrderParams(
-                        symbol=signal.symbol,
-                        side=OrderSide.SELL if position.side == PositionSide.LONG else OrderSide.BUY,
-                        order_type=OrderType.MARKET,
-                        amount=position.size,
-                        reduce_only=True,
-                        leverage=position.leverage,
-                        margin_mode=position.margin_mode.value if hasattr(position.margin_mode, 'value') else str(position.margin_mode),
-                        extra_params={
-                            'posSide': 'long' if position.side == PositionSide.LONG else 'short'
-                        }
+                    try:
+                        open_orders = await exchange.get_open_orders(signal.symbol)
+                    except Exception:
+                        open_orders = []
+                    for oi in open_orders or []:
+                        try:
+                            await exchange.cancel_order(oi.id, oi.symbol)
+                        except Exception:
+                            pass
+                    results: List[OrderResult] = []
+                    for position in positions:
+                        order = OrderParams(
+                            symbol=signal.symbol,
+                            side=OrderSide.SELL if position.side == PositionSide.LONG else OrderSide.BUY,
+                            order_type=OrderType.MARKET,
+                            amount=position.size,
+                            reduce_only=True,
+                            leverage=position.leverage,
+                            margin_mode=position.margin_mode.value if hasattr(position.margin_mode, 'value') else str(position.margin_mode),
+                            extra_params={
+                                'posSide': 'long' if position.side == PositionSide.LONG else 'short'
+                            }
+                        )
+                        res = await exchange.create_order(order)
+                        results.append(res)
+                    all_ok = all(r.success for r in results) if results else False
+                    if not all_ok:
+                        msg = "; ".join([r.error_message or "" for r in results if not r.success]) or "Close failed"
+                        return OrderResult(success=False, error_message=msg, extra_info={'orders': [r.to_dict() for r in results]})
+                    first = results[0]
+                    return OrderResult(
+                        success=True,
+                        order_id=first.order_id,
+                        executed_price=first.executed_price,
+                        executed_amount=sum([(r.executed_amount or 0) for r in results]),
+                        extra_info={'orders': [r.to_dict() for r in results]}
                     )
-                    return await exchange.create_order(order)
                 except Exception as e:
                     logging.error(f"Error handling CLOSE action: {e}")
                     return OrderResult(success=False, error_message=str(e))
@@ -1768,9 +1792,9 @@ class ExchangeManager:
 
             if signal.entry_zones:
                 results = []
-                total_amount = signal.position_size
+                total_amount = signal.position_size * signal.leverage
 
-                for zone in signal.entry_zones:
+                for index,zone in enumerate(signal.entry_zones):
                     # Calculate USDT amount for this zone
                     zone_amount = total_amount * zone.percentage
 
@@ -1783,7 +1807,7 @@ class ExchangeManager:
 
                     # Prepare TP/SL
                     tp_price_sig = None
-                    if signal.take_profit_levels:
+                    if signal.take_profit_levels: #todo multi TPs
                         try:
                             tp_price_sig = signal.take_profit_levels[0].price
                         except Exception:

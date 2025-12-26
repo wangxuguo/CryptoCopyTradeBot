@@ -438,6 +438,7 @@ class ChannelManagement:
                 ],
                 WAITING_FOR_PROMPT: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_prompt_input),
+                    # MessageHandler(filters.COMMAND, self.use_default_prompt),
                     CallbackQueryHandler(self.cancel_add_channel, pattern='^cancel$')
                 ],
                 WAITING_FOR_FORWARD_CHANNEL: [
@@ -518,6 +519,7 @@ class ChannelManagement:
                             f"请输入用于分析消息的prompt:\n"
                             f"(这是一个用于分析频道消息的GPT提示词)",
                             reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton("使用默认提示词", callback_data="use_default_prompt"),
                                 InlineKeyboardButton("取消", callback_data="cancel")
                             ]])
                         )
@@ -686,6 +688,44 @@ class ChannelManagement:
             else:
                 await message.reply_text("❌ 添加频道失败")
             
+            context.user_data.clear()
+            return ConversationHandler.END
+
+        except Exception as e:
+            logging.error(f"Error handling prompt input: {e}")
+            await message.reply_text("添加频道时发生错误")
+            return ConversationHandler.END
+
+    async def use_default_prompt(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """处理prompt输入"""
+        try:
+            message = update.message
+            channel_info = context.user_data.get('channel_info')
+            if not channel_info:
+                await message.reply_text("❌ 频道信息丢失，请重新开始")
+                return ConversationHandler.END
+
+            prompt = ""
+
+            # 使用原始channel_id添加频道
+            success = self.db.add_channel(
+                channel_id=channel_info['id'],  # 使用原始ID
+                channel_name=channel_info['title'],
+                channel_username=channel_info['username'],
+                channel_type='MONITOR',
+                prompt=prompt
+            )
+
+            if success:
+                await message.reply_text(
+                    f"✅ 监控频道添加成功!\n\n"
+                    f"名称: {channel_info['title']}\n"
+                    f"ID: {channel_info['id']}\n"  # 显示完整ID
+                    f"Prompt: {prompt}"
+                )
+            else:
+                await message.reply_text("❌ 添加频道失败")
+
             context.user_data.clear()
             return ConversationHandler.END
 
