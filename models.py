@@ -30,6 +30,7 @@ class TradingSignal:
     position_size: float = 50.0
     source_message: str = ""
     confidence: float = 0.0
+    order_type: str = "LIMIT"  #"LIMIT 或者 MARKET",
     risk_level: str = "MEDIUM"
     timestamp: datetime = datetime.now()
     

@@ -1884,17 +1884,20 @@ class ExchangeManager:
                 tp_price_sig = None
                 if signal.take_profit_levels:
                     try:
-                        tp_price_sig = signal.take_profit_levels[0].price
+                        levels = signal.take_profit_levels
+                        tp_price_sig = levels[1].price if len(levels) > 1 else levels[0].price
                     except Exception:
                         tp_price_sig = None
                 sl_price_sig = signal.stop_loss
-
+                price = signal.entry_price,
+                if signal.order_type == "MARKET":
+                    price = None
                 order = OrderParams(
                     symbol=signal.symbol,
                     side=OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
                     order_type=OrderType.MARKET if not signal.entry_price else OrderType.LIMIT,
                     amount=signal.position_size,
-                    price=signal.entry_price,  # 可能为None（市价单）
+                    price=price,  # 可能为None（市价单）
                     leverage=signal.leverage,
                     margin_mode=signal.margin_mode,
                     extra_params={
