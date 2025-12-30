@@ -915,11 +915,11 @@ class ExchangeClient(ABC):
                     'max_leverage': max_leverage,
                     'tiers': leverage_info
                 }
-            return {'max_leverage': 1, 'tiers': []}
+            return {'max_leverage': 5, 'tiers': []}
             
         except Exception as e:
             logging.error(f"Error getting leverage info: {e}")
-            return {'max_leverage': 1, 'tiers': []}
+            return {'max_leverage': 5, 'tiers': []}
 
     async def set_leverage(self, symbol: str, leverage: int, margin_mode: str) -> int:
         """Set leverage with validation"""
@@ -930,7 +930,7 @@ class ExchangeClient(ABC):
                     brackets = await getattr(self, 'get_leverage_brackets')(norm, margin_mode) if hasattr(self, 'get_leverage_brackets') else []
                 except Exception:
                     brackets = []
-                max_lev = max(int(b.get('maxLeverage', 1)) for b in brackets) if brackets else leverage
+                max_lev = max(int(b.get('maxLeverage', 5)) for b in brackets) if brackets else leverage
                 actual_leverage = min(leverage, max_lev)
                 logging.info(f"OKX leverage resolved: requested={leverage}, max={max_lev}, actual={actual_leverage}")
                 return actual_leverage
@@ -1807,9 +1807,10 @@ class ExchangeManager:
 
                     # Prepare TP/SL
                     tp_price_sig = None
-                    if signal.take_profit_levels: #todo multi TPs
+                    if signal.take_profit_levels:
                         try:
-                            tp_price_sig = signal.take_profit_levels[0].price
+                            levels = signal.take_profit_levels
+                            tp_price_sig = levels[1].price if len(levels) > 1 else levels[0].price
                         except Exception:
                             tp_price_sig = None
                     sl_price_sig = signal.stop_loss
