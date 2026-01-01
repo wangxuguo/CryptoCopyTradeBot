@@ -931,6 +931,8 @@ class ExchangeClient(ABC):
                 except Exception:
                     brackets = []
                 max_lev = max(int(b.get('maxLeverage', 5)) for b in brackets) if brackets else leverage
+                if max_lev <= 1:
+                    max_lev = leverage
                 actual_leverage = min(leverage, max_lev)
                 logging.info(f"OKX leverage resolved: requested={leverage}, max={max_lev}, actual={actual_leverage}")
                 return actual_leverage
@@ -1535,14 +1537,55 @@ class OKXClient(ExchangeClient):
                 }
             )
             if response and response.get('code') == '0' and response.get('data'):
-                return [
+                data_list = response.get('data', [])
+                parsed = [
                     {
                         'maxLeverage': int(d.get('maxLever', 1)),
                         'maxSize': float(d.get('maxSz', 0) or 0),
                         'maintMarginRatio': float(d.get('mmr', 0) or 0)
                     }
-                    for d in response.get('data', [])
+                    for d in data_list
                 ]
+                max_lev = max((p.get('maxLeverage', 1) or 1) for p in parsed) if parsed else 1
+                if max_lev > 1:
+                    return parsed
+                try:
+                    inst_type = str((market.get('info') or {}).get('instType') or '')
+                    if not inst_type:
+                        if 'SWAP' in str(inst_id):
+                            inst_type = 'SWAP'
+                        elif 'FUTURE' in str(inst_id) or 'FUTURES' in str(inst_id):
+                            inst_type = 'FUTURES'
+                        else:
+                            inst_type = 'SWAP'
+                    raw2 = await self._okx_request('/api/v5/public/instruments', 'GET', None, {'instType': inst_type, 'instId': inst_id})
+                    if raw2 and str(raw2.get('code')) == '0':
+                        d2 = (raw2.get('data') or [{}])[0]
+                        candidates = []
+                        for k in ('lever', 'maxLever', 'maxLeverage'):
+                            v = d2.get(k)
+                            if v is not None:
+                                try:
+                                    candidates.append(int(float(v)))
+                                except Exception:
+                                    pass
+                        guessed = max(candidates) if candidates else 0
+                        if guessed > 1:
+                            logging.info(f"OKX leverage fallback from instruments: {guessed} for {inst_id}")
+                            return [{'maxLeverage': guessed}]
+                except Exception as e:
+                    logging.warning(f"OKX instruments fallback failed: {e}")
+                try:
+                    tiers = await asyncio.to_thread(self._exchange.fetchMarketLeverageTiers, norm)
+                    if tiers and isinstance(tiers, list):
+                        mv = int((tiers[0] or {}).get('maxLeverage', 0) or 0)
+                        if mv > 1:
+                            logging.info(f"OKX leverage fallback from market tiers: {mv} for {inst_id}")
+                            return [{'maxLeverage': mv}]
+                except Exception as e:
+                    logging.warning(f"OKX market tiers fallback failed: {e}")
+                logging.info(f"OKX max leverage resolved to 1; using conservative value for {inst_id}")
+                return parsed
             return []
         except Exception as e:
             logging.error(f"Error getting leverage brackets: {e}")
