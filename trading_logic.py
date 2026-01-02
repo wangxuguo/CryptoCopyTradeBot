@@ -156,7 +156,7 @@ CANCEL是当前有委托订单，撤销当前委托订单
                 return False
 
             # 验证操作类型
-            if data['action'] not in ['OPEN_LONG', 'OPEN_SHORT', 'CLOSE',"UPDATE"]:
+            if data['action'] not in ['OPEN_LONG', 'OPEN_SHORT', 'CLOSE', 'UPDATE', 'TURNOVER']:
                 logging.error(f"Invalid action: {data['action']}")
                 return False
 

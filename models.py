@@ -23,7 +23,7 @@ class TakeProfitLevel:
 class TradingSignal:
     exchange: str
     symbol: str
-    action: str  # OPEN_LONG, OPEN_SHORT, CLOSE, UPDATE, CANCEL
+    action: str  # OPEN_LONG, OPEN_SHORT, CLOSE, UPDATE, CANCEL， TURNOVER
     entry_price: Optional[float] = None
     take_profit: Optional[float] = None
     stop_loss: Optional[float] = None
@@ -145,7 +145,7 @@ class TradingSignal:
         # UPDATE 操作允许没有入场价格/区间，仅更新委托或持仓的TP/SL
         if self.action != 'UPDATE' and not self.entry_zones and not self.entry_price:
             return False
-        if self.action not in ['OPEN_LONG', 'OPEN_SHORT', 'CLOSE', 'UPDATE']:
+        if self.action not in ['OPEN_LONG', 'OPEN_SHORT', 'CLOSE', 'UPDATE', 'TURNOVER']:
             return False
         return True
 

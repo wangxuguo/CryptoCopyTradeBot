@@ -969,6 +969,11 @@ class ExchangeClient(ABC):
                 Requested Leverage: {leverage}
                 Actual Leverage: {actual_leverage}
             """)
+            try:
+                price = float(price) if price is not None else float(market_info.last_price or 0.0)
+            except Exception:
+                price = float(market_info.last_price or 0.0)
+            usdt_amount = float(usdt_amount)
             is_contract = (market_info.amount_precision == 0)
             logging.info(f"""is_contract: {is_contract}""")
             if is_contract:
@@ -1077,7 +1082,12 @@ class ExchangeClient(ABC):
                 raise ValueError(f"Cannot get market info for {order.symbol}")
 
             # 确定使用价格
-            use_price = order.price if (order.order_type == OrderType.LIMIT and order.price) else market_info.last_price
+            use_price = market_info.last_price
+            if order.order_type == OrderType.LIMIT and order.price is not None:
+                try:
+                    use_price = self._format_price(ccxt_symbol, float(order.price))
+                except Exception:
+                    use_price = market_info.last_price
             
             # 设置杠杆和保证金模式
             leverage = order.leverage or 3  # 默认3倍杠杆
@@ -1310,10 +1320,13 @@ class ExchangeClient(ABC):
             
             
             logging.info(f"format_priceoriginal--price{price}")
-            return price
+            return float(price)
         except Exception as e:
             logging.error(f"Error formatting price: {e}")
-            return price
+            try:
+                return float(price)
+            except Exception:
+                return 0.0
 
     def _format_amount(self, symbol: str, amount: float) -> float:
         """Format amount according to symbol precision"""
@@ -1774,7 +1787,89 @@ class ExchangeManager:
                     logging.error(f"Error handling CANCEL action: {e}")
                     return OrderResult(success=False, error_message=str(e))
             # UPDATE: amend open orders price and TP/SL, or modify position TP/SL
+            if signal.action == 'TURNOVER':
+                try:
+                    positions = await exchange.get_positions(signal.symbol)
+                    if not positions:
+                        return OrderResult(success=False, error_message="No open position to turnover")
+                    try:
+                        open_orders = await exchange.get_open_orders(signal.symbol)
+                    except Exception:
+                        open_orders = []
+                    for oi in open_orders or []:
+                        try:
+                            await exchange.cancel_order(oi.id, oi.symbol)
+                        except Exception:
+                            pass
+                    results_close: List[OrderResult] = []
+                    for position in positions:
+                        order_close = OrderParams(
+                            symbol=signal.symbol,
+                            side=OrderSide.SELL if position.side == PositionSide.LONG else OrderSide.BUY,
+                            order_type=OrderType.MARKET,
+                            amount=position.size,
+                            reduce_only=True,
+                            leverage=position.leverage,
+                            margin_mode=position.margin_mode.value if hasattr(position.margin_mode, 'value') else str(position.margin_mode),
+                            extra_params={
+                                'posSide': 'long' if position.side == PositionSide.LONG else 'short'
+                            }
+                        )
+                        resc = await exchange.create_order(order_close)
+                        results_close.append(resc)
+                    all_closed = all(r.success for r in results_close) if results_close else False
+                    long_total = sum([p.size for p in positions if p.side == PositionSide.LONG])
+                    short_total = sum([p.size for p in positions if p.side == PositionSide.SHORT])
+                    side_open = OrderSide.SELL if long_total >= short_total else OrderSide.BUY
+                    margin_mode_use = signal.margin_mode or (positions[0].margin_mode.value if hasattr(positions[0].margin_mode, 'value') else str(positions[0].margin_mode))
+                    leverage_use = signal.leverage or (positions[0].leverage if positions else 3)
+                    amount_usdt = signal.position_size if (signal.position_size and signal.position_size > 0) else None
+                    if amount_usdt is None:
+                        market_info = await exchange.get_market_info(signal.symbol)
+                        if market_info and market_info.last_price:
+                            ct = float(market_info.contract_size or 1.0)
+                            net_size = abs(long_total - short_total) if (long_total and short_total) else (positions[0].size if positions else 1.0)
+                            notional = net_size * market_info.last_price * ct
+                            amount_usdt = max(1.0, notional / max(1, leverage_use))
+                        else:
+                            amount_usdt = 50.0
+                    tp_price_sig = None
+                    if signal.take_profit_levels:
+                        try:
+                            levels = signal.take_profit_levels
+                            tp_price_sig = levels[1].price if len(levels) > 1 else levels[0].price
+                        except Exception:
+                            tp_price_sig = None
+                    sl_price_sig = signal.stop_loss if signal.stop_loss and signal.stop_loss > 0 else None
+                    order_open = OrderParams(
+                        symbol=signal.symbol,
+                        side=side_open,
+                        order_type=OrderType.MARKET,
+                        amount=amount_usdt,
+                        price=None,
+                        leverage=leverage_use,
+                        margin_mode=margin_mode_use,
+                        extra_params={
+                            'tpTriggerPx': tp_price_sig if tp_price_sig else None,
+                            'slTriggerPx': sl_price_sig if sl_price_sig else None,
+                        }
+                    )
+                    res_open = await exchange.create_order(order_open)
+                    if not all_closed:
+                        msg = "; ".join([r.error_message or "" for r in results_close if not r.success]) or "Close failed during turnover"
+                        return OrderResult(success=False, error_message=msg, extra_info={'closed_orders': [r.to_dict() for r in results_close], 'open_order': res_open.to_dict() if res_open else None})
+                    return OrderResult(
+                        success=res_open.success,
+                        order_id=res_open.order_id,
+                        executed_price=res_open.executed_price,
+                        executed_amount=res_open.executed_amount,
+                        extra_info={'closed_orders': [r.to_dict() for r in results_close], 'open_order': res_open.to_dict() if res_open else None}
+                    )
+                except Exception as e:
+                    logging.error(f"Error handling TURNOVER action: {e}")
+                    return OrderResult(success=False, error_message=str(e))
             if signal.action == 'UPDATE':
+                
                 try:
                     open_orders = await exchange.get_open_orders(signal.symbol)
                     updated_any = False
@@ -1835,7 +1930,7 @@ class ExchangeManager:
 
             if signal.entry_zones:
                 results = []
-                total_amount = signal.position_size * signal.leverage
+                total_amount = signal.position_size
 
                 for index,zone in enumerate(signal.entry_zones):
                     # Calculate USDT amount for this zone
@@ -1932,7 +2027,7 @@ class ExchangeManager:
                     except Exception:
                         tp_price_sig = None
                 sl_price_sig = signal.stop_loss
-                price = signal.entry_price,
+                price = signal.entry_price
                 if signal.order_type == "MARKET":
                     price = None
                 order = OrderParams(
