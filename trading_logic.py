@@ -357,7 +357,7 @@ CANCEL是当前有委托订单，撤销当前委托订单
                     entry_zones=entry_zones if entry_zones else None,  # 可以是None
                     take_profit_levels=take_profit_levels if take_profit_levels else None,
                     stop_loss=stop_loss,
-                    position_size=float(data.get('position_size', 50.0)),
+                    position_size=float(data.get('position_size', 2000.0)),
                     leverage=int(data.get('leverage', 10)),
                     margin_mode=data.get('margin_mode', 'cross'),
                     confidence=float(data.get('confidence', 0.8)),
@@ -512,6 +512,7 @@ CANCEL是当前有委托订单，撤销当前委托订单
                 
                 if self._validate_json_data(signal_dict):
                     normalized_dict = self._normalize_numbers(signal_dict)
+                    # TODO 如果只是简单的止盈消息，会被忽略
                     signal = self._convert_to_trading_signal(normalized_dict)
                     
                     if signal and signal.is_valid():

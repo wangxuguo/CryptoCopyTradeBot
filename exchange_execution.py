@@ -7,6 +7,8 @@ import math
 import hmac
 import hashlib
 import base64
+import secrets
+import string
 from urllib.parse import urlencode
 import time
 import logging
@@ -81,6 +83,7 @@ class OrderParams:
     reduce_only: bool = False
     leverage: Optional[int] = None
     margin_mode: str = MarginType.CROSS
+    cl_ord_id: Optional[str] = None
     extra_params: Dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> bool:
@@ -105,6 +108,7 @@ class OrderParams:
 class OrderInfo:
     """Order information"""
     id: str
+    cl_ord_id: Optional[str] = None
     symbol: str
     side: str
     type: str
@@ -120,6 +124,8 @@ class OrderInfo:
     def from_exchange_order(order: Dict[str, Any]) -> Optional['OrderInfo']:
         """Create OrderInfo from exchange order data"""
         try:
+            info = order.get('info', {}) if isinstance(order, dict) else {}
+            clid = order.get('clientOrderId') or order.get('clOrdId') or info.get('clientOrderId') or info.get('clOrdId')
             return OrderInfo(
                 id=order['id'],
                 symbol=order['symbol'],
@@ -131,7 +137,8 @@ class OrderInfo:
                 remaining=float(order.get('remaining', order['amount'])),
                 status=order['status'],
                 fee=order.get('fee', {}),
-                timestamp=datetime.fromtimestamp(order['timestamp']/1000)
+                timestamp=datetime.fromtimestamp(order['timestamp']/1000),
+                cl_ord_id=str(clid) if clid else None
             )
         except Exception as e:
             logging.error(f"Error creating OrderInfo: {e}")
@@ -694,6 +701,11 @@ class ExchangeClient(ABC):
             return float(value)
         except (TypeError, ValueError):
             return default
+    
+    def _generate_client_order_id(self) -> str:
+        """Generate a compliant client order id: [A-Za-z0-9], case-sensitive, max 32 chars"""
+        alphabet = string.ascii_letters + string.digits
+        return ''.join(secrets.choice(alphabet) for _ in range(24))
 
     async def fetch_positions(self, symbol: Optional[str] = None) -> List[PositionInfo]:
         """Fetch positions"""
@@ -811,15 +823,24 @@ class ExchangeClient(ABC):
             return []
 
 
-    async def cancel_order(self, order_id: str, symbol: str) -> bool:
+    async def cancel_order(self, order_id: str, symbol: str, cl_ord_id: Optional[str] = None) -> bool:
         """Cancel order"""
         try:
             self._rate_limit()
-            result = await asyncio.to_thread(
-                self._exchange.cancelOrder,
-                order_id,
-                symbol
-            )
+            if getattr(self, 'exchange_name', '') == 'OKX':
+                try:
+                    market = await asyncio.to_thread(self._exchange.market, self._normalize_symbol(symbol))
+                    inst_id = market.get('id')
+                    body = {'instId': inst_id}
+                    if cl_ord_id and isinstance(cl_ord_id, str) and cl_ord_id:
+                        body['clOrdId'] = str(cl_ord_id)
+                    else:
+                        body['ordId'] = str(order_id)
+                    raw = await self._okx_request('/api/v5/trade/cancel-order', 'POST', body)
+                    return str(raw.get('code')) == '0'
+                except Exception as e:
+                    logging.warning(f"OKX cancel via clOrdId/ordId failed: {e}")
+            result = await asyncio.to_thread(self._exchange.cancelOrder, order_id, symbol)
             return bool(result)
         except Exception as e:
             logging.error(f"Error canceling order: {e}")
@@ -1157,8 +1178,14 @@ class ExchangeClient(ABC):
                 params_extras['reduceOnly'] = True
             # 交易所特定参数（OKX）
             if getattr(self, 'exchange_name', '') == 'OKX':
+                try:
+                    if not order.cl_ord_id or not isinstance(order.cl_ord_id, str) or not order.cl_ord_id.isalnum() or len(order.cl_ord_id) > 32:
+                        order.cl_ord_id = self._generate_client_order_id()
+                except Exception:
+                    order.cl_ord_id = self._generate_client_order_id()
                 params_extras['tdMode'] = order.margin_mode  # 'cross' 或 'isolated'
                 params_extras['lever'] = actual_leverage
+                params_extras['clOrdId'] = order.cl_ord_id
                 # Prefer inline TP/SL when provided in order params
                 try:
                     tp_px = order.extra_params.get('tpTriggerPx') or order.extra_params.get('takeProfitPrice')
@@ -1737,7 +1764,7 @@ class ExchangeManager:
                         open_orders = []
                     for oi in open_orders or []:
                         try:
-                            await exchange.cancel_order(oi.id, oi.symbol)
+                            await exchange.cancel_order(oi.id, oi.symbol, getattr(oi, 'cl_ord_id', None))
                         except Exception:
                             pass
                     results: List[OrderResult] = []
@@ -1781,12 +1808,12 @@ class ExchangeManager:
                     # 撤销所有未成交的限价单
                     for oi in open_orders:
                         if oi.type.lower() == 'limit':
-                            await exchange.cancel_order(oi.id, oi.symbol)
+                            await exchange.cancel_order(oi.id, oi.symbol, getattr(oi, 'cl_ord_id', None))
                     return OrderResult(success=True)
                 except Exception as e:
                     logging.error(f"Error handling CANCEL action: {e}")
                     return OrderResult(success=False, error_message=str(e))
-            # UPDATE: amend open orders price and TP/SL, or modify position TP/SL
+            #TURNOVER reverse the order side，close current orders and create a new order with opposite side
             if signal.action == 'TURNOVER':
                 try:
                     positions = await exchange.get_positions(signal.symbol)
@@ -1798,7 +1825,7 @@ class ExchangeManager:
                         open_orders = []
                     for oi in open_orders or []:
                         try:
-                            await exchange.cancel_order(oi.id, oi.symbol)
+                            await exchange.cancel_order(oi.id, oi.symbol, getattr(oi, 'cl_ord_id', None))
                         except Exception:
                             pass
                     results_close: List[OrderResult] = []
@@ -1868,15 +1895,16 @@ class ExchangeManager:
                 except Exception as e:
                     logging.error(f"Error handling TURNOVER action: {e}")
                     return OrderResult(success=False, error_message=str(e))
+            # UPDATE: amend open orders price and TP/SL, or modify position TP/SL
             if signal.action == 'UPDATE':
-                
                 try:
                     open_orders = await exchange.get_open_orders(signal.symbol)
                     updated_any = False
                     tp_px = None
                     if signal.take_profit_levels:
                         try:
-                            tp_px = signal.take_profit_levels[0].price
+                            levels = signal.take_profit_levels
+                            tp_px = levels[1].price if len(levels) > 1 else levels[0].price
                         except Exception:
                             tp_px = None
                     sl_px = signal.stop_loss if signal.stop_loss and signal.stop_loss > 0 else None
@@ -1885,7 +1913,7 @@ class ExchangeManager:
                             continue
                         new_price = signal.entry_price if signal.entry_price else oi.price
                         if getattr(exchange, 'exchange_name', '') == 'OKX':
-                            raw = await exchange._okx_amend_order(exchange._normalize_symbol(oi.symbol), oi.id, None, new_price)
+                            raw = await exchange._okx_amend_order(exchange._normalize_symbol(oi.symbol), oi.id, getattr(oi, 'cl_ord_id', None), new_price)
                             if str(raw.get('code')) == '0':
                                 updated_any = True
                                 if tp_px or sl_px:
@@ -1897,7 +1925,7 @@ class ExchangeManager:
                                 logging.warning(f"OKX amend failed: {raw}")
                         else:
                             try:
-                                await exchange.cancel_order(oi.id, oi.symbol)
+                                await exchange.cancel_order(oi.id, oi.symbol, getattr(oi, 'cl_ord_id', None))
                                 price_use = new_price or oi.price
                                 leverage_use = signal.leverage or 10
                                 usdt_amount = max(1.0, (oi.amount * (price_use or 0.0)) / max(1, leverage_use))
@@ -2048,7 +2076,8 @@ class ExchangeManager:
                 if result.success:
                     tp_price = None
                     if signal.take_profit_levels:
-                        tp_price = signal.take_profit_levels[0].price
+                        levels = signal.take_profit_levels
+                        tp_price = levels[1].price if len(levels) > 1 else levels[0].price
                     sl_price = signal.stop_loss
                     try:
                         if order.extra_params:
