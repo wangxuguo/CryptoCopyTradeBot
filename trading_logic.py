@@ -25,6 +25,10 @@ class TradingLogic:
         else:
             self.openai_client = OpenAI(api_key=openai_key)
         self.exchange_manager = exchange_manager
+        self._message_history: List[Dict[str, Any]] = []
+        self._open_active: bool = False
+        self._last_message_ts: Optional[datetime] = None
+        self._last_message_content: Optional[str] = None
         self.default_prompt = """你是一名专业的交易信号分析器（Trade Signal Parser）。你的任务是解析用户输入文本，判断是否包含新的交易信号或对现有订单的更新。输入包含两部分：
 1. 最新消息文本
 2. 当前订单信息（持仓或委托）。若两者均为空，则视为“空仓状态”。
@@ -445,22 +449,40 @@ CANCEL是当前有委托订单，撤销当前委托订单
             logging.info(f"Original message:\n{'-'*40}\n{message}\n{'-'*40}")
             cleaned_message = self._preprocess_message(message)
 
-            # 如需追加当前持仓或委托，请在调用方传入扩展文本再拼接
+            # 根据是否存在当前委托/持仓，维护消息历史并决定上传内容
             open_orders = self.exchange_manager.get_open_orders()
-            if open_orders:
-                cleaned_message += f"\n\n【当前持仓/委托】\n{open_orders}"
+            now_ts = datetime.now()
+            active = bool(open_orders)
+            user_content = cleaned_message
+            if not active:
+                self._open_active = False
+                self._message_history = []
+            else:
+                if not self._open_active:
+                    self._open_active = True
+                    self._message_history = []
+                self._message_history.append({'ts': now_ts.isoformat(), 'text': cleaned_message})
+                try:
+                    oo_text = str(open_orders)
+                except Exception:
+                    oo_text = ""
+                history_text = "\n".join([f"[{r['ts']}] {r['text']}" for r in self._message_history])
+                user_content = f"{cleaned_message}\n\n【当前持仓/委托】\n{oo_text}\n\n【有开仓以来的消息】\n{history_text}"
+
             # logging.info(f"Using prompt:\n{'-'*40}\n{prompt}\n{'-'*40}")
-            
+            logging.info(f"user_content: {user_content}")
             response = self.openai_client.chat.completions.create(
                 #model="gpt-5",#gpt-3.5-turbo
                 model="gpt-3.5-turbo",
                 messages=[
                     {"role": "system", "content": prompt},
-                    {"role": "user", "content": cleaned_message}
+                    {"role": "user", "content": user_content}
                 ],
                 temperature=0.7,
                 max_tokens=1024
             )
+            self._last_message_ts = now_ts
+            self._last_message_content = cleaned_message
 
             response_text = None
             try:
