@@ -110,84 +110,78 @@ class TradingBot:
             network_indicator = "🏮 测试网" if self.config.trading.use_testnet else "🔵 主网"
 
             # 处理消息
-            signal = await self.message_processor.process_channel_message(
+            signals = await self.message_processor.process_channel_message(
                 event=event,
                 client=self.client,
                 bot=self.application.bot
             )
 
-            if signal:
-                if signal.is_valid():
-                    # 执行信号
-                    if self.config.trading.auto_trade_enabled:
-                        result = await self.exchange_manager.execute_signal(signal)
-                        if result.success:
-                            await self.notify_owner(
-                                f"{network_indicator} 自动交易执行成功\n\n"
+            if signals:
+                for signal in signals:
+                    if signal.is_valid():
+                        if self.config.trading.auto_trade_enabled:
+                            result = await self.exchange_manager.execute_signal(signal)
+                            if result.success:
+                                await self.notify_owner(
+                                    f"{network_indicator} 自动交易执行成功\n\n"
+                                    f"交易对: {signal.symbol}\n"
+                                    f"方向: {'做多' if signal.action == 'OPEN_LONG' else '做空'}\n"
+                                    f"订单ID: {result.order_id}\n"
+                                    f"执行价格: {result.executed_price}\n"
+                                    f"数量: {result.executed_amount}"
+                                )
+                            else:
+                                await self.notify_owner(
+                                    f"{network_indicator} 自动交易执行失败\n\n"
+                                    f"交易对: {signal.symbol}\n"
+                                    f"错误: {result.error_message}"
+                                )
+                        else:
+                            message_text = (
+                                f"{network_indicator} 新交易信号\n\n"
+                                f"来源: {chat.title}\n"
                                 f"交易对: {signal.symbol}\n"
                                 f"方向: {'做多' if signal.action == 'OPEN_LONG' else '做空'}\n"
-                                f"订单ID: {result.order_id}\n"
-                                f"执行价格: {result.executed_price}\n"
-                                f"数量: {result.executed_amount}"
                             )
-                        else:
-                            await self.notify_owner(
-                                f"{network_indicator} 自动交易执行失败\n\n"
-                                f"交易对: {signal.symbol}\n"
-                                f"错误: {result.error_message}"
-                            )
-                    else:
-                        # 发送信号通知
-                        message_text = (
-                            f"{network_indicator} 新交易信号\n\n"
-                            f"来源: {chat.title}\n"
-                            f"交易对: {signal.symbol}\n"
-                            f"方向: {'做多' if signal.action == 'OPEN_LONG' else '做空'}\n"
-                        )
-
-                        if signal.entry_zones:
-                            message_text += "\n入场区间:\n"
-                            for zone in signal.entry_zones:
-                                message_text += f"- ${zone.price} ({zone.percentage * 100}%)\n"
-                        else:
-                            message_text += f"\n入场价格: ${signal.entry_price}"
-
-                        if signal.take_profit_levels:
-                            message_text += "\n\n止盈目标:\n"
-                            for tp in signal.take_profit_levels:
-                                message_text += f"- ${tp.price} ({tp.percentage * 100}%)\n"
-
-                        if signal.stop_loss:
-                            message_text += f"\n止损: ${signal.stop_loss}"
-
-                        keyboard = [
-                            [
-                                InlineKeyboardButton(
-                                    "✅ 执行交易",
-                                    callback_data=f"execute_{signal.symbol}_{signal.signal_id}"
-                                ),
-                                InlineKeyboardButton(
-                                    "❌ 忽略",
-                                    callback_data=f"ignore_{signal.signal_id}"
-                                )
-                            ],
-                            [
-                                InlineKeyboardButton(
-                                    "📊 查看分析",
-                                    callback_data=f"analysis_{signal.symbol}_{signal.signal_id}"
-                                )
+                            if signal.entry_zones:
+                                message_text += "\n入场区间:\n"
+                                for zone in signal.entry_zones:
+                                    message_text += f"- ${zone.price} ({zone.percentage * 100}%)\n"
+                            else:
+                                message_text += f"\n入场价格: ${signal.entry_price}"
+                            if signal.take_profit_levels:
+                                message_text += "\n\n止盈目标:\n"
+                                for tp in signal.take_profit_levels:
+                                    message_text += f"- ${tp.price} ({tp.percentage * 100}%)\n"
+                            if signal.stop_loss:
+                                message_text += f"\n止损: ${signal.stop_loss}"
+                            keyboard = [
+                                [
+                                    InlineKeyboardButton(
+                                        "✅ 执行交易",
+                                        callback_data=f"execute_{signal.symbol}_{signal.signal_id}"
+                                    ),
+                                    InlineKeyboardButton(
+                                        "❌ 忽略",
+                                        callback_data=f"ignore_{signal.signal_id}"
+                                    )
+                                ],
+                                [
+                                    InlineKeyboardButton(
+                                        "📊 查看分析",
+                                        callback_data=f"analysis_{signal.symbol}_{signal.signal_id}"
+                                    )
+                                ]
                             ]
-                        ]
-
-                        try:
-                            await self.application.bot.send_message(
-                                chat_id=self.config.OWNER_ID,
-                                text=message_text,
-                                reply_markup=InlineKeyboardMarkup(keyboard)
-                            )
-                        except Exception as e:
-                            logging.error(f"Error sending notification: {e}")
-                            await self.notify_owner(f"发送通知失败: {str(e)}")
+                            try:
+                                await self.application.bot.send_message(
+                                    chat_id=self.config.OWNER_ID,
+                                    text=message_text,
+                                    reply_markup=InlineKeyboardMarkup(keyboard)
+                                )
+                            except Exception as e:
+                                logging.error(f"Error sending notification: {e}")
+                                await self.notify_owner(f"发送通知失败: {str(e)}")
 
         except Exception as e:
             error_msg = f"Error handling channel message: {e}"

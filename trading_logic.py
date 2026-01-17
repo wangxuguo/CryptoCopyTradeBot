@@ -1,5 +1,5 @@
 # trading_logic.py
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Union
 import logging
 import re
 import json
@@ -441,8 +441,8 @@ CANCEL是当前有委托订单，撤销当前委托订单
             return message
 
 
-    def process_message(self, message: str, custom_prompt: Optional[str] = None) -> Optional[TradingSignal]:
-        """处理消息并提取交易信号"""
+    def process_message(self, message: str, custom_prompt: Optional[str] = None) -> Optional[List[TradingSignal]]:
+        """处理消息并提取交易信号（支持返回多个有效信号）"""
         try:
             prompt = custom_prompt if custom_prompt else self.default_prompt
             
@@ -506,26 +506,50 @@ CANCEL是当前有委托订单，撤销当前委托订单
                         response_text = ""
             logging.info(f"GPT response:\n{'-'*40}\n{response_text}\n{'-'*40}")
             
-            signal_dict = self._parse_response(response_text)
-            if signal_dict:
-                logging.info(f"Parsed signal dictionary:\n{'-'*40}\n{json.dumps(signal_dict, indent=2)}\n{'-'*40}")
-                
-                if self._validate_json_data(signal_dict):
-                    normalized_dict = self._normalize_numbers(signal_dict)
-                    # TODO 如果只是简单的止盈消息，会被忽略
-                    signal = self._convert_to_trading_signal(normalized_dict)
-                    
-                    if signal and signal.is_valid():
-                        risk_ratio_valid = True#self._validate_risk_ratio(signal)
-                        logging.info(f"Risk ratio validation: {risk_ratio_valid}")
-                        if risk_ratio_valid:
-                            return signal
+            signal_dict_or_list = self._parse_response(response_text)
+            if signal_dict_or_list:
+                if isinstance(signal_dict_or_list, list):
+                    logging.info(f"Parsed JSON array with {len(signal_dict_or_list)} items")
+                    valid_signals: List[TradingSignal] = []
+                    for idx, item in enumerate(signal_dict_or_list, 1):
+                        try:
+                            logging.info(f"Processing item {idx}:\n{'-'*40}\n{json.dumps(item, indent=2)}\n{'-'*40}")
+                        except Exception:
+                            logging.info(f"Processing item {idx}")
+                        if self._validate_json_data(item):
+                            normalized = self._normalize_numbers(item)
+                            signal_i = self._convert_to_trading_signal(normalized)
+                            if signal_i and signal_i.is_valid():
+                                risk_ratio_valid = True
+                                logging.info(f"Risk ratio validation: {risk_ratio_valid}")
+                                if risk_ratio_valid:
+                                    valid_signals.append(signal_i)
+                                else:
+                                    logging.error("Risk ratio validation failed")
+                            else:
+                                logging.error("Signal validation failed")
                         else:
-                            logging.error("Risk ratio validation failed")
+                            logging.error("JSON data validation failed")
+                    if valid_signals:
+                        return valid_signals
                     else:
-                        logging.error("Signal validation failed")
+                        logging.error("No valid signals parsed from array")
                 else:
-                    logging.error("JSON data validation failed")
+                    logging.info(f"Parsed signal dictionary:\n{'-'*40}\n{json.dumps(signal_dict_or_list, indent=2)}\n{'-'*40}")
+                    if self._validate_json_data(signal_dict_or_list):
+                        normalized_dict = self._normalize_numbers(signal_dict_or_list)
+                        signal = self._convert_to_trading_signal(normalized_dict)
+                        if signal and signal.is_valid():
+                            risk_ratio_valid = True
+                            logging.info(f"Risk ratio validation: {risk_ratio_valid}")
+                            if risk_ratio_valid:
+                                return [signal]
+                            else:
+                                logging.error("Risk ratio validation failed")
+                        else:
+                            logging.error("Signal validation failed")
+                    else:
+                        logging.error("JSON data validation failed")
             else:
                 logging.error("Failed to parse GPT response")
 
@@ -579,7 +603,7 @@ CANCEL是当前有委托订单，撤销当前委托订单
             logging.error(f"Error extracting response text: {e}")
             return None
 
-    def _parse_response(self, response_text: str) -> Optional[Dict[str, Any]]:
+    def _parse_response(self, response_text: str) -> Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]:
         """解析GPT响应"""
         try:
             # 记录开始解析
@@ -595,14 +619,37 @@ CANCEL是当前有委托订单，撤销当前委托订单
                 if line.strip():
                     cleaned_text += line + "\n"
                     
-            # 提取JSON部分
+            # 直接解析完整文本为JSON（可能是对象或数组）
+            try:
+                direct_parsed = json.loads(cleaned_text.strip())
+                if isinstance(direct_parsed, list):
+                    logging.info(f"Detected JSON array with {len(direct_parsed)} items")
+                    return [item for item in direct_parsed if isinstance(item, dict)]
+                if isinstance(direct_parsed, dict):
+                    logging.info("Detected top-level JSON object")
+                    return direct_parsed
+            except Exception:
+                pass
+            
+            # 尝试提取JSON数组
+            array_match = re.search(r'\[.*\]', cleaned_text, re.DOTALL)
+            if array_match:
+                array_str = array_match.group()
+                logging.info(f"Extracted JSON array string:\n{'-'*40}\n{array_str}\n{'-'*40}")
+                try:
+                    arr = json.loads(array_str)
+                    if isinstance(arr, list):
+                        return [item for item in arr if isinstance(item, dict)]
+                except Exception as e:
+                    logging.warning(f"Failed to parse JSON array: {e}")
+            
+            # 退回到提取单个JSON对象
             json_match = re.search(r'{.*}', cleaned_text, re.DOTALL)
             if not json_match:
                 logging.warning("No JSON found in response")
                 return None
-                    
             json_str = json_match.group()
-            logging.info(f"Extracted JSON string:\n{'-'*40}\n{json_str}\n{'-'*40}")
+            logging.info(f"Extracted JSON object string:\n{'-'*40}\n{json_str}\n{'-'*40}")
             
             # 解析JSON
             parsed_data = json.loads(json_str)

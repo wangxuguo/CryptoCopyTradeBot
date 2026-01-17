@@ -290,8 +290,8 @@ class MessageProcessor:
         except Exception as e:
             logging.error(f"Error resending message: {e}")
     # message_processor.py 中的 MessageProcessor 类
-    async def process_channel_message(self, event, client, bot) -> Optional[TradingSignal]:
-        """处理频道消息"""
+    async def process_channel_message(self, event, client, bot) -> Optional[List[TradingSignal]]:
+        """处理频道消息（支持多个交易信号）"""
         try:
             # 验证事件对象
             if not event:
@@ -388,7 +388,7 @@ class MessageProcessor:
             custom_prompt = channel_info.get('prompt')
                 
             # 尝试解析信号
-            trading_signal = self.trading_logic.process_message(
+            trading_signals = self.trading_logic.process_message(
                 cleaned_message,
                 custom_prompt
             )
@@ -403,43 +403,44 @@ class MessageProcessor:
                 target_user_id=8184692730,
                 text=cleaned_message
             )
-            if trading_signal:
-                # 验证交易对是否存在
-                if not await self._validate_trading_pair(trading_signal):
-                    if bot:  # 确保bot存在
-                        await self._notify_invalid_pair(
-                            bot, 
-                            channel_info.get('forward_channel_id'),
-                            trading_signal.symbol
-                        )
-                    return None
-                    
-                # 添加源信息
-                trading_signal.source_message = channel_message.text
-                trading_signal.source_channel = channel_message.channel_id
-                    
-                # 保存信号到数据库
-                signal_id = self.db.add_signal_tracking(trading_signal)
-                if signal_id > 0:
-                    trading_signal.signal_id = signal_id
-                        
-                    # 转发到目标频道
-                    if bot:  # 在测试模式下可能没有client
-                        forward_channels = self.db.get_forward_channels(channel_message.channel_id)
-                        logging.info(f"ForwardChannels---{forward_channels}--senderchannel---{channel_message.channel_id}")
-                        if forward_channels:  # 确保有转发频道
+            if trading_signals:
+                forward_channels = None
+                if bot:
+                    forward_channels = self.db.get_forward_channels(channel_message.channel_id)
+                    logging.info(f"ForwardChannels---{forward_channels}--senderchannel---{channel_message.channel_id}")
+                processed: List[TradingSignal] = []
+                for trading_signal in trading_signals:
+                    # 验证交易对是否存在
+                    if not await self._validate_trading_pair(trading_signal):
+                        if bot:  # 确保bot存在
+                            await self._notify_invalid_pair(
+                                bot, 
+                                channel_info.get('forward_channel_id'),
+                                trading_signal.symbol
+                            )
+                        continue
+                    # 添加源信息
+                    trading_signal.source_message = channel_message.text
+                    trading_signal.source_channel = channel_message.channel_id
+                    # 保存信号到数据库
+                    signal_id = self.db.add_signal_tracking(trading_signal)
+                    if signal_id > 0:
+                        trading_signal.signal_id = signal_id
+                        processed.append(trading_signal)
+                        # 转发到目标频道
+                        if bot and forward_channels:
                             for forward_channel in forward_channels:
-                                if forward_channel and 'channel_id' in forward_channel:  # 确保频道信息完整
-                                    f_channel_id =  forward_channel['channel_id']
-                                    if(f_channel_id>0):
+                                if forward_channel and 'channel_id' in forward_channel:
+                                    f_channel_id = forward_channel['channel_id']
+                                    if (f_channel_id > 0):
                                         f_channel_id = -int(f"100{f_channel_id}")
                                     await self.forward_signal(
                                         trading_signal,
                                         f_channel_id,
                                         bot
                                     )
-                                
-                return trading_signal
+                    time.sleep(10)
+                return processed if processed else None
 
             return None
                     
