@@ -108,12 +108,12 @@ class OrderParams:
 class OrderInfo:
     """Order information"""
     id: str
-    cl_ord_id: Optional[str] = None
     symbol: str
     side: str
     type: str
     price: Optional[float]
     amount: float
+    cl_ord_id: Optional[str] = None
     filled: float = 0
     remaining: float = 0
     status: str = OrderStatus.PENDING
