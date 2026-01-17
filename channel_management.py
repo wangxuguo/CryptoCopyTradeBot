@@ -438,7 +438,7 @@ class ChannelManagement:
                 ],
                 WAITING_FOR_PROMPT: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_prompt_input),
-                    # MessageHandler(filters.COMMAND, self.use_default_prompt),
+                    CallbackQueryHandler(self.use_default_prompt, pattern='^use_default_prompt$'),
                     CallbackQueryHandler(self.cancel_add_channel, pattern='^cancel$')
                 ],
                 WAITING_FOR_FORWARD_CHANNEL: [
@@ -697,19 +697,18 @@ class ChannelManagement:
             return ConversationHandler.END
 
     async def use_default_prompt(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """处理prompt输入"""
         try:
-            message = update.message
+            query = update.callback_query
+            await query.answer()
             channel_info = context.user_data.get('channel_info')
             if not channel_info:
-                await message.reply_text("❌ 频道信息丢失，请重新开始")
+                await query.message.edit_text("❌ 频道信息丢失，请重新开始")
                 return ConversationHandler.END
 
-            prompt = ""
+            prompt = None
 
-            # 使用原始channel_id添加频道
             success = self.db.add_channel(
-                channel_id=channel_info['id'],  # 使用原始ID
+                channel_id=channel_info['id'],
                 channel_name=channel_info['title'],
                 channel_username=channel_info['username'],
                 channel_type='MONITOR',
@@ -717,21 +716,23 @@ class ChannelManagement:
             )
 
             if success:
-                await message.reply_text(
+                await query.message.edit_text(
                     f"✅ 监控频道添加成功!\n\n"
                     f"名称: {channel_info['title']}\n"
-                    f"ID: {channel_info['id']}\n"  # 显示完整ID
-                    f"Prompt: {prompt}"
+                    f"ID: {channel_info['id']}\n"
+                    f"Prompt: 默认"
                 )
             else:
-                await message.reply_text("❌ 添加频道失败")
+                await query.message.edit_text("❌ 添加频道失败")
 
             context.user_data.clear()
             return ConversationHandler.END
-
         except Exception as e:
-            logging.error(f"Error handling prompt input: {e}")
-            await message.reply_text("添加频道时发生错误")
+            logging.error(f"Error handling default prompt: {e}")
+            try:
+                await update.callback_query.message.edit_text("添加频道时发生错误")
+            except Exception:
+                pass
             return ConversationHandler.END
 
 
