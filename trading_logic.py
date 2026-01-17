@@ -36,9 +36,11 @@ class TradingLogic:
 当前持仓:
 OKX:
 BTC/USDT:USDT sell limit 量:1.0 价:88820.0 状态:open
+备注：价指的是买入价或者卖出价，也就是成本价
 当前委托:
 OKX:
 BTC/USDT:USDT sell limit 量:1.0 价:88820.0 状态:open
+备注：价指的是挂单价
 
 输出要求（必须严格遵守）
 你只能输出 JSON。
@@ -49,7 +51,7 @@ BTC/USDT:USDT sell limit 量:1.0 价:88820.0 状态:open
 {
   "exchange": "OKX",
   "symbol": "BTCUSDT",
-  "action": "OPEN_LONG 或 OPEN_SHORT 或 CLOSE 或 UPDATE 或 CANCEL",
+  "action": "OPEN_LONG 或 OPEN_SHORT 或 CLOSE 或 UPDATE 或 CANCEL 或者TURNOVER",
   "entry_price": float 或 [float, float],
   "take_profit_levels": [
     {
@@ -65,6 +67,7 @@ BTC/USDT:USDT sell limit 量:1.0 价:88820.0 状态:open
   "confidence": float(0-1),
   "risk_level": "LOW 或 MEDIUM 或 HIGH"
 }
+或者信息中有多个信号返回json数组 [{},{}]
 字段缺失时需根据规则自动推算或使用默认值。
 
 规则
@@ -91,12 +94,14 @@ HIGH：高杠杆、宽 SL、模糊内容
 消息文本中没有明确说明都是MARKET类型，有限价字样的是LIMIT类型
 7. 默认值
 leverage：3
-position_size：2000
+position_size：5000
 margin_mode：isolated
 exchange: OKX
+8. 换手做多,换手直接入场做多，当前持有空单，直接换手为多单
+9. 换手做空,换手直接入场做空，当前持有多单，直接换手为空
 
 频道模式（关键逻辑）
-此为多人会员频道，不是一对一模式。
+此为多人会员频道，不是一对一模式，只关注非一对一模式的消息，或者全部止盈的消息。
 
 任意时刻只能存在一笔活跃订单。
 若当前为空仓 → 可生成 OPEN_LONG 或 OPEN_SHORT
@@ -113,9 +118,6 @@ UPDATE 定义，UPDATE 用于任何以下情况：
 CANCEL 定义
 CANCEL是当前有委托订单，撤销当前委托订单
 
-开仓规则
-输入文本中务必有明确的止盈止损才能开仓，开多仓或者开空仓
-
 空仓规则
 当前无持仓且无委托 → 可开新仓
 若已有持仓或委托 → 不允许新开仓，只能 UPDATE
@@ -130,6 +132,13 @@ CANCEL是当前有委托订单，撤销当前委托订单
 随意聊天
 过度模糊无法推断
 不含任何交易意图的信息
+
+部分输入内容解读：
+1. 剩余仓位全部止盈出局--》发送 CLOSE
+2. 换手直接入场做空/做多 --》发送 TURNOVER
+3. 空单/多单全部出局--》发送 CLOSE
+4. 中长线止盈d%，做成本保护继续持有--》发送 CLOSE，仓位为d%，发送UPDATE，止损设置为成本价
+5. BTC市价$1附近 小赚$2点止盈$3% 做成本保护过夜-->在$1止盈$3%,发送CLOSE，仓位为$3%并且发送UPDATE，止损设置为成本价
 
 最终要求
 
