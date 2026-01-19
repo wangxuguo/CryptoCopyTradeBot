@@ -1247,10 +1247,11 @@ class ExchangeClient(ABC):
                 raw = await self._okx_create_order(symbol_arg, type_arg, side_arg, amount_arg, price_arg, params_extras)
                 code = str(raw.get('code'))
                 if code != '0':
-                    # 针对 51010 账户模式错误的回退
+                    # 针对错误码进行回退处理
                     data_list_err = raw.get('data') or []
                     sCode = str((data_list_err[0] or {}).get('sCode')) if data_list_err else ''
                     if sCode == '51010':
+                        # 账户持仓模式不匹配，移除 posSide 并降级为 cross 再试
                         pe = dict(params_extras)
                         pe.pop('posSide', None)
                         pe['tdMode'] = 'cross'
@@ -1260,6 +1261,25 @@ class ExchangeClient(ABC):
                             result = data_list[0] if data_list else {}
                             raw = raw2
                         else:
+                            pe['posSide'] = 'net'
+                            raw3 = await self._okx_create_order(symbol_arg, type_arg, side_arg, amount_arg, price_arg, pe)
+                            if str(raw3.get('code')) == '0':
+                                data_list = raw3.get('data') or []
+                                result = data_list[0] if data_list else {}
+                                raw = raw3
+                            else:
+                                raise OrderException(f"OKX order rejected: {raw3}")
+                    elif sCode == '51000':
+                        # 参数错误（例如 posSide 不合法），移除 posSide 重试
+                        pe = dict(params_extras)
+                        pe.pop('posSide', None)
+                        raw2 = await self._okx_create_order(symbol_arg, type_arg, side_arg, amount_arg, price_arg, pe)
+                        if str(raw2.get('code')) == '0':
+                            data_list = raw2.get('data') or []
+                            result = data_list[0] if data_list else {}
+                            raw = raw2
+                        else:
+                            # 再尝试使用 net（仅当端点接受）
                             pe['posSide'] = 'net'
                             raw3 = await self._okx_create_order(symbol_arg, type_arg, side_arg, amount_arg, price_arg, pe)
                             if str(raw3.get('code')) == '0':

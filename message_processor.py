@@ -388,7 +388,7 @@ class MessageProcessor:
             custom_prompt = channel_info.get('prompt')
                 
             # 尝试解析信号
-            trading_signals = self.trading_logic.process_message(
+            trading_signals = await self.trading_logic.process_message(
                 cleaned_message,
                 custom_prompt
             )

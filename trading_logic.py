@@ -1,5 +1,6 @@
 # trading_logic.py
 from typing import Optional, Dict, Any, List, Tuple, Union
+import asyncio
 import logging
 import re
 import json
@@ -450,7 +451,7 @@ CANCEL是当前有委托订单，撤销当前委托订单
             return message
 
 
-    def process_message(self, message: str, custom_prompt: Optional[str] = None) -> Optional[List[TradingSignal]]:
+    async def process_message(self, message: str, custom_prompt: Optional[str] = None) -> Optional[List[TradingSignal]]:
         """处理消息并提取交易信号（支持返回多个有效信号）"""
         try:
             prompt = custom_prompt if custom_prompt else self.default_prompt
@@ -459,7 +460,18 @@ CANCEL是当前有委托订单，撤销当前委托订单
             cleaned_message = self._preprocess_message(message)
 
             # 根据是否存在当前委托/持仓，维护消息历史并决定上传内容
-            open_orders = self.exchange_manager.get_open_orders()
+            open_orders = None
+            try:
+                exm = getattr(self, 'exchange_manager', None)
+                if exm:
+                    fn = getattr(exm, 'get_open_orders', None)
+                    if fn:
+                        if asyncio.iscoroutinefunction(fn):
+                            open_orders = await fn()
+                        else:
+                            open_orders = fn()
+            except Exception:
+                open_orders = None
             now_ts = datetime.now()
             active = bool(open_orders)
             user_content = cleaned_message
@@ -472,11 +484,26 @@ CANCEL是当前有委托订单，撤销当前委托订单
                     self._message_history = []
                 self._message_history.append({'ts': now_ts.isoformat(), 'text': cleaned_message})
                 try:
-                    oo_text = str(open_orders)
+                    oo_text = ""
+                    if isinstance(open_orders, dict):
+                        lines: List[str] = []
+                        for ex_name, orders in open_orders.items():
+                            lines.append(f"{ex_name}:")
+                            for od in orders or []:
+                                lines.append(
+                                    f"{getattr(od, 'symbol', '')} {getattr(od, 'side', '')} {getattr(od, 'type', '')} 量:{getattr(od, 'amount', 0)} 价:{getattr(od, 'price', '') if getattr(od, 'price', None) is not None else ''} 状态:{getattr(od, 'status', '')}"
+                                )
+                        if lines:
+                            oo_text = "\n".join(lines)
+                    else:
+                        oo_text = str(open_orders or "")
                 except Exception:
                     oo_text = ""
                 history_text = "\n".join([f"[{r['ts']}] {r['text']}" for r in self._message_history])
-                user_content = f"{cleaned_message}\n\n【当前持仓/委托】\n{oo_text}\n\n【有开仓以来的消息】\n{history_text}"
+                if ("当前持仓" in cleaned_message) or ("当前委托" in cleaned_message):
+                    user_content = f"{cleaned_message}\n\n【有开仓以来的消息】\n{history_text}"
+                else:
+                    user_content = f"{cleaned_message}\n\n【当前持仓/委托】\n{oo_text}\n\n【有开仓以来的消息】\n{history_text}"
 
             # logging.info(f"Using prompt:\n{'-'*40}\n{prompt}\n{'-'*40}")
             logging.info(f"user_content: {user_content}")
