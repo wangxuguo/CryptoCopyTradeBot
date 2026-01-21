@@ -2076,12 +2076,12 @@ class ExchangeManager:
                         tp_price_sig = None
                 sl_price_sig = signal.stop_loss
                 price = signal.entry_price
-                if signal.order_type == "MARKET":
+                if str(signal.order_type).upper() == "MARKET":
                     price = None
                 order = OrderParams(
                     symbol=signal.symbol,
                     side=OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
-                    order_type=OrderType.MARKET if not signal.entry_price else OrderType.LIMIT,
+                    order_type=OrderType.MARKET if str(signal.order_type).upper() == "MARKET" else OrderType.LIMIT,
                     amount=signal.position_size,
                     price=price,  # 可能为None（市价单）
                     leverage=signal.leverage,
