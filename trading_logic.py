@@ -95,7 +95,7 @@ HIGH：高杠杆、宽 SL、模糊内容
 消息文本中没有明确说明都是MARKET类型，有限价字样的是LIMIT类型
 7. 默认值
 leverage：3
-position_size：5000
+position_size：4500
 margin_mode：isolated
 exchange: OKX
 8. 换手做多,换手直接入场做多，当前持有空单，直接换手为多单
