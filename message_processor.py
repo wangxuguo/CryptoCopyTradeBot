@@ -348,6 +348,30 @@ class MessageProcessor:
             logging.info(f"ChannelInfo -- from message db--{channel_info}")
             if not channel_info or not channel_info['is_active'] or channel_info['channel_type']!='MONITOR':
                 return None
+            # 完全转发原始消息（包括媒体、表情等所有内容）
+            try:
+                # 优先使用 copy_message 完整转发
+                await bot.copy_message(
+                    chat_id=-4813705648,
+                    from_chat_id=channel_id,
+                    message_id=message.id
+                )
+            except Exception as e:
+                # 如果复制失败，尝试提取文本或 caption 转发
+                fallback_text = getattr(message, 'text', None) or getattr(message, 'caption', None)
+                if fallback_text:
+                    await self.resend_message_text_to_user(
+                        bot=bot,
+                        target_user_id=584536494,
+                        text=fallback_text
+                    )
+                    await self.resend_message_text_to_user(
+                        bot=bot,
+                        target_user_id=8184692730,
+                        text=fallback_text
+                    )
+                else:
+                    logging.error("无法提取任何可转发的内容")
 
             cleaned_message = self.preprocess_message(channel_message.text)
 

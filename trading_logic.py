@@ -337,26 +337,6 @@ CANCEL是当前有委托订单，撤销当前委托订单
                     stop_loss = float(data['stop_loss'])
                 except (TypeError, ValueError):
                     logging.error("Invalid stop loss value")
-
-            '''{
-                "exchange": "OKX",
-                "symbol": "BTCUSDT",
-                "action": "OPEN_LONG",
-                "entry_price": 90300.0,
-                "take_profit_levels": [
-                    {
-                    "price": 92500.0,
-                    "percentage": 100.0
-                    }
-                ],
-                "stop_loss": 89000.0,
-                "position_size": 180.0,
-                "leverage": 10,
-                "margin_mode": "isolated",
-                "confidence": 0.7,
-                "risk_level": "MEDIUM"
-                }
-            '''
             # 创建信号对象
             try:
                 signal = TradingSignal(
@@ -458,6 +438,15 @@ CANCEL是当前有委托订单，撤销当前委托订单
             
             logging.info(f"Original message:\n{'-'*40}\n{message}\n{'-'*40}")
             cleaned_message = self._preprocess_message(message)
+            # 提取并拼接引用消息
+            quote_pattern = re.compile(r'>(.*?)(?=\n|$)', re.DOTALL)
+            quote_matches = quote_pattern.findall(message)
+            if quote_matches:
+                quote_text = "\n".join([q.strip() for q in quote_matches])
+                cleaned_message = f"{cleaned_message}\n【引用消息】\n{quote_text}"
+            
+            logging.info(f"Preprocessed message (with quote):\n{'-'*40}\n{cleaned_message}\n{'-'*40}")
+            #return cleaned_message
 
             # 根据是否存在当前委托/持仓，维护消息历史并决定上传内容
             open_orders = None
@@ -507,16 +496,32 @@ CANCEL是当前有委托订单，撤销当前委托订单
 
             # logging.info(f"Using prompt:\n{'-'*40}\n{prompt}\n{'-'*40}")
             logging.info(f"user_content: {user_content}")
-            response = self.openai_client.chat.completions.create(
-                #model="gpt-5",#gpt-3.5-turbo
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": user_content}
-                ],
-                temperature=0.7,
-                max_tokens=1024
-            )
+            try:
+                response = self.openai_client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": user_content}
+                    ],
+                    temperature=0.7,
+                    max_tokens=1024
+                )
+            except Exception as e:
+                logging.warning(f"OpenAI 接口调用失败: {e}，尝试使用 qwen 接口")
+                try:
+                    # 使用 qwen 接口作为备选
+                    response = self.openai_client.chat.completions.create(
+                        model="qwen-turbo",  # 假设 qwen 提供的模型名称
+                        messages=[
+                            {"role": "system", "content": prompt},
+                            {"role": "user", "content": user_content}
+                        ],
+                        temperature=0.7,
+                        max_tokens=1024
+                    )
+                except Exception as qwen_e:
+                    logging.error(f"qwen 接口也调用失败: {qwen_e}")
+                    raise qwen_e
             self._last_message_ts = now_ts
             self._last_message_content = cleaned_message
 

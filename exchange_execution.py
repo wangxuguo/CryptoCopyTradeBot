@@ -457,6 +457,10 @@ class ExchangeClient(ABC):
         q = urlencode(query or {})
         qs = f"?{q}" if q else ""
         body = "" if m == 'GET' else json.dumps(payload or {}, separators=(',', ':'))
+        try:
+            logging.info(f"OKX request start: method={m} path={path} qs={qs} body_len={len(body)}")
+        except Exception:
+            pass
         prehash = f"{ts}{m}{path}{qs}{body}"
         sign = hmac.new(self.credentials.api_secret.encode(), prehash.encode(), hashlib.sha256).digest()
         sign_b64 = base64.b64encode(sign).decode()
@@ -473,10 +477,18 @@ class ExchangeClient(ABC):
         if m == 'GET':
             async with self._session.get(url, headers=headers) as resp:
                 data = await resp.json()
+                try:
+                    logging.info(f"OKX response: path={path} code={str(data.get('code')) if isinstance(data, dict) else 'N/A'}")
+                except Exception:
+                    pass
                 return data
         else:
             async with self._session.post(url, headers=headers, data=body) as resp:
                 data = await resp.json()
+                try:
+                    logging.info(f"OKX response: path={path} code={str(data.get('code')) if isinstance(data, dict) else 'N/A'}")
+                except Exception:
+                    pass
                 return data
 
     async def _okx_create_order(self, symbol: str, type_arg: str, side_arg: str, amount_arg: float, price_arg: Optional[float], params: Dict[str, Any]) -> Dict[str, Any]:
@@ -519,7 +531,16 @@ class ExchangeClient(ABC):
             })
         if attach_list:
             body['attachAlgoOrds'] = attach_list
-        return await self._okx_request('/api/v5/trade/order', 'POST', body)
+        try:
+            logging.info(f"OKX create order: instId={inst_id} side={side_arg.lower()} type={type_arg.lower()} sz={body['sz']} px={body.get('px')} tdMode={body.get('tdMode')} posSide={body.get('posSide')} reduceOnly={body.get('reduceOnly')} lever={body.get('lever')} clOrdId={'Y' if body.get('clOrdId') else 'N'} attachAlgoOrds_count={len(body.get('attachAlgoOrds', []))}")
+        except Exception:
+            pass
+        raw = await self._okx_request('/api/v5/trade/order', 'POST', body)
+        try:
+            logging.info(f"OKX create order result: code={str(raw.get('code')) if isinstance(raw, dict) else 'N/A'} data_count={len(raw.get('data', [])) if isinstance(raw, dict) else 'N/A'}")
+        except Exception:
+            pass
+        return raw
 
     async def _okx_amend_order(self, symbol: str, ord_id: Optional[str], cl_ord_id: Optional[str], new_px: Optional[float]) -> Dict[str, Any]:
         try:
@@ -543,7 +564,16 @@ class ExchangeClient(ABC):
                     if min_sell is not None and px < min_sell:
                         px = min_sell
                 body['newPx'] = str(px)
-            return await self._okx_request('/api/v5/trade/amend-order', 'POST', body)
+            try:
+                logging.info(f"OKX amend order: instId={inst_id} ordId={str(ord_id) if ord_id else ''} clOrdId={str(cl_ord_id) if cl_ord_id else ''} newPx={body.get('newPx')}")
+            except Exception:
+                pass
+            raw = await self._okx_request('/api/v5/trade/amend-order', 'POST', body)
+            try:
+                logging.info(f"OKX amend order result: code={str(raw.get('code')) if isinstance(raw, dict) else 'N/A'}")
+            except Exception:
+                pass
+            return raw
         except Exception as e:
             logging.error(f"Error amending OKX order: {e}")
             return {'code': '1', 'msg': str(e)}
@@ -557,6 +587,10 @@ class ExchangeClient(ABC):
                 d = (raw.get('data') or [{}])[0]
                 max_buy = d.get('buyLmtPx') or d.get('buyPx') or d.get('buyLmt')
                 min_sell = d.get('sellLmtPx') or d.get('sellPx') or d.get('sellLmt')
+                try:
+                    logging.info(f"OKX price limit: instId={inst_id} max_buy={max_buy} min_sell={min_sell}")
+                except Exception:
+                    pass
                 return {
                     'max_buy': float(max_buy) if max_buy is not None else None,
                     'min_sell': float(min_sell) if min_sell is not None else None,
@@ -583,6 +617,10 @@ class ExchangeClient(ABC):
                 if side_close.lower() == 'sell' and min_sell is not None and v < min_sell:
                     v = min_sell
             return v
+        try:
+            logging.info(f"OKX attach TP/SL start: instId={inst_id} side_close={side_close.lower()} amount_contracts={amount_contracts} tdMode={td_mode} posSide={pos_side} tp_price_req={tp_price} sl_price_req={sl_price}")
+        except Exception:
+            pass
         tp_price = clamp(tp_price)
         sl_price = clamp(sl_price)
         body: Dict[str, Any] = {
@@ -614,14 +652,28 @@ class ExchangeClient(ABC):
             body['slTriggerPxType'] = 'last'
         else:
             return {'code': '0', 'data': []}
-        return await self._okx_request('/api/v5/trade/order-algo', 'POST', body)
+        try:
+            logging.info(f"OKX attach TP/SL body: ordType={body.get('ordType')} tp={body.get('tpTriggerPx')} sl={body.get('slTriggerPx')} posSide={body.get('posSide')} sz={body.get('sz')}")
+        except Exception:
+            pass
+        raw = await self._okx_request('/api/v5/trade/order-algo', 'POST', body)
+        try:
+            logging.info(f"OKX attach TP/SL result: code={str(raw.get('code')) if isinstance(raw, dict) else 'N/A'}")
+        except Exception:
+            pass
+        return raw
 
     async def _okx_list_algo_orders(self, symbol: str) -> List[Dict[str, Any]]:
         market = await asyncio.to_thread(self._exchange.market, symbol)
         inst_id = market.get('id')
         raw = await self._okx_request('/api/v5/trade/orders-algo-pending', 'GET', None, {'instId': inst_id})
         if raw and str(raw.get('code')) == '0':
-            return raw.get('data') or []
+            data = raw.get('data') or []
+            try:
+                logging.info(f"OKX list algo orders: instId={inst_id} count={len(data)}")
+            except Exception:
+                pass
+            return data
         return []
 
     async def _okx_cancel_algo_orders(self, symbol: str, algo_ids: List[str]) -> Dict[str, Any]:
@@ -633,12 +685,25 @@ class ExchangeClient(ABC):
             'instId': inst_id,
             'algoId': [str(i) for i in algo_ids]
         }
-        return await self._okx_request('/api/v5/trade/cancel-algos', 'POST', body)
+        try:
+            logging.info(f"OKX cancel algo orders: instId={inst_id} ids={body['algoId']}")
+        except Exception:
+            pass
+        raw = await self._okx_request('/api/v5/trade/cancel-algos', 'POST', body)
+        try:
+            logging.info(f"OKX cancel algo orders result: code={str(raw.get('code')) if isinstance(raw, dict) else 'N/A'}")
+        except Exception:
+            pass
+        return raw
 
     async def _okx_cancel_existing_tp_sl(self, symbol: str, side_close: Optional[str], pos_side: Optional[str]) -> None:
         try:
             pending = await self._okx_list_algo_orders(symbol)
             targets: List[str] = []
+            try:
+                logging.info(f"OKX cancel existing TP/SL: pending_count={len(pending)} side_close={str(side_close).lower() if side_close else None} pos_side={str(pos_side).lower() if pos_side else None}")
+            except Exception:
+                pass
             for o in pending:
                 side = str(o.get('side', '')).lower()
                 ps = str(o.get('posSide', '')).lower() if o.get('posSide') else None
@@ -657,6 +722,10 @@ class ExchangeClient(ABC):
                     if algo_id:
                         targets.append(str(algo_id))
             if targets:
+                try:
+                    logging.info(f"OKX cancel existing TP/SL: targets_count={len(targets)}")
+                except Exception:
+                    pass
                 raw = await self._okx_cancel_algo_orders(symbol, targets)
                 if str(raw.get('code')) != '0':
                     logging.warning(f"OKX cancel existing TP/SL failed: {raw}")
@@ -1338,6 +1407,26 @@ class ExchangeClient(ABC):
             pos_side = None
             if getattr(self, 'pos_mode', None) == 'long_short':
                 pos_side = 'long' if side_open.lower() == 'buy' else 'short'
+            # Prevent immediate trigger when updating TP/SL
+            try:
+                mkt = await self.get_market_info(symbol)
+                last = mkt.last_price if mkt else None
+                if last is not None:
+                    step = 10 ** (-int(mkt.price_precision)) if (hasattr(mkt, 'price_precision') and isinstance(mkt.price_precision, int)) else max(1e-6, last * 1e-6)
+                    tp = take_profit
+                    sl = stop_loss
+                    if side_close.lower() == 'sell':
+                        if tp is not None and last >= float(tp):
+                            take_profit = float(last) + float(step)
+                        if sl is not None and last <= float(sl):
+                            stop_loss = float(last) - float(step)
+                    else:
+                        if tp is not None and last <= float(tp):
+                            take_profit = float(last) - float(step)
+                        if sl is not None and last >= float(sl):
+                            stop_loss = float(last) + float(step)
+            except Exception:
+                pass
             try:
                 await self._okx_cancel_existing_tp_sl(self._normalize_symbol(symbol), side_close, pos_side)
             except Exception as e:
@@ -1770,25 +1859,32 @@ class ExchangeManager:
                     success=False,
                     error_message=f"Exchange {signal.exchange} not configured"
                 )
+            logging.info(f"ExecuteSignal start: exchange={signal.exchange} symbol={signal.symbol} action={signal.action} order_type={signal.order_type} entry_price={signal.entry_price} position_size={signal.position_size} leverage={signal.leverage} margin_mode={signal.margin_mode} tp_levels_count={len(signal.take_profit_levels or [])} stop_loss={signal.stop_loss}")
 
             # Handle CLOSE: only reduce existing position, do not create new entry orders
             if signal.action == 'CLOSE':
                 try:
+                    logging.info(f"ExecuteSignal CLOSE: fetching positions for {signal.symbol}")
                     positions = await exchange.get_positions(signal.symbol)
+                    logging.info(f"ExecuteSignal CLOSE: positions_count={len(positions or [])}")
                     if not positions:
                         logging.info(f"Ignore CLOSE: no open position for {signal.symbol}")
                         return OrderResult(success=False, error_message="No open position to close")
                     try:
+                        logging.info(f"ExecuteSignal CLOSE: fetching open orders for {signal.symbol}")
                         open_orders = await exchange.get_open_orders(signal.symbol)
+                        logging.info(f"ExecuteSignal CLOSE: open_orders_count={len(open_orders or [])}")
                     except Exception:
                         open_orders = []
                     for oi in open_orders or []:
                         try:
+                            logging.info(f"ExecuteSignal CLOSE: cancel order id={oi.id} symbol={oi.symbol} clOrdId={getattr(oi, 'cl_ord_id', None)}")
                             await exchange.cancel_order(oi.id, oi.symbol, getattr(oi, 'cl_ord_id', None))
                         except Exception:
                             pass
                     results: List[OrderResult] = []
                     for position in positions:
+                        logging.info(f"ExecuteSignal CLOSE: closing position symbol={signal.symbol} side={'SELL' if position.side == PositionSide.LONG else 'BUY'} size={position.size} leverage={position.leverage} margin_mode={position.margin_mode}")
                         order = OrderParams(
                             symbol=signal.symbol,
                             side=OrderSide.SELL if position.side == PositionSide.LONG else OrderSide.BUY,
@@ -1804,6 +1900,7 @@ class ExchangeManager:
                         res = await exchange.create_order(order)
                         results.append(res)
                     all_ok = all(r.success for r in results) if results else False
+                    logging.info(f"ExecuteSignal CLOSE: results_count={len(results)} all_ok={all_ok}")
                     if not all_ok:
                         msg = "; ".join([r.error_message or "" for r in results if not r.success]) or "Close failed"
                         return OrderResult(success=False, error_message=msg, extra_info={'orders': [r.to_dict() for r in results]})
@@ -1821,13 +1918,16 @@ class ExchangeManager:
             # CANCEL: 撤销当前委托订单
             if signal.action == 'CANCEL':
                 try:
+                    logging.info(f"ExecuteSignal CANCEL: fetching open orders for {signal.symbol}")
                     open_orders = await exchange.get_open_orders(signal.symbol)
+                    logging.info(f"ExecuteSignal CANCEL: open_orders_count={len(open_orders or [])}")
                     if not open_orders:
                         logging.info(f"Ignore CANCEL: no open orders for {signal.symbol}")
                         return OrderResult(success=False, error_message="No open orders to cancel")
                     # 撤销所有未成交的限价单
                     for oi in open_orders:
                         if oi.type.lower() == 'limit':
+                            logging.info(f"ExecuteSignal CANCEL: cancel limit order id={oi.id} symbol={oi.symbol} price={oi.price} amount={oi.amount}")
                             await exchange.cancel_order(oi.id, oi.symbol, getattr(oi, 'cl_ord_id', None))
                     return OrderResult(success=True)
                 except Exception as e:
@@ -1836,20 +1936,26 @@ class ExchangeManager:
             #TURNOVER reverse the order side，close current orders and create a new order with opposite side
             if signal.action == 'TURNOVER':
                 try:
+                    logging.info(f"ExecuteSignal TURNOVER: fetching positions for {signal.symbol}")
                     positions = await exchange.get_positions(signal.symbol)
+                    logging.info(f"ExecuteSignal TURNOVER: positions_count={len(positions or [])}")
                     if not positions:
                         return OrderResult(success=False, error_message="No open position to turnover")
                     try:
+                        logging.info(f"ExecuteSignal TURNOVER: fetching open orders for {signal.symbol}")
                         open_orders = await exchange.get_open_orders(signal.symbol)
+                        logging.info(f"ExecuteSignal TURNOVER: open_orders_count={len(open_orders or [])}")
                     except Exception:
                         open_orders = []
                     for oi in open_orders or []:
                         try:
+                            logging.info(f"ExecuteSignal TURNOVER: cancel order id={oi.id} symbol={oi.symbol}")
                             await exchange.cancel_order(oi.id, oi.symbol, getattr(oi, 'cl_ord_id', None))
                         except Exception:
                             pass
                     results_close: List[OrderResult] = []
                     for position in positions:
+                        logging.info(f"ExecuteSignal TURNOVER: closing position symbol={signal.symbol} size={position.size} side={'SELL' if position.side == PositionSide.LONG else 'BUY'}")
                         order_close = OrderParams(
                             symbol=signal.symbol,
                             side=OrderSide.SELL if position.side == PositionSide.LONG else OrderSide.BUY,
@@ -1880,6 +1986,7 @@ class ExchangeManager:
                             amount_usdt = max(1.0, notional / max(1, leverage_use))
                         else:
                             amount_usdt = 50.0
+                    logging.info(f"ExecuteSignal TURNOVER: long_total={long_total} short_total={short_total} side_open={side_open} leverage_use={leverage_use} margin_mode_use={margin_mode_use} amount_usdt={amount_usdt}")
                     tp_price_sig = None
                     if signal.take_profit_levels:
                         try:
@@ -1888,6 +1995,7 @@ class ExchangeManager:
                         except Exception:
                             tp_price_sig = None
                     sl_price_sig = signal.stop_loss if signal.stop_loss and signal.stop_loss > 0 else None
+                    logging.info(f"ExecuteSignal TURNOVER: tp_price_sig={tp_price_sig} sl_price_sig={sl_price_sig}")
                     order_open = OrderParams(
                         symbol=signal.symbol,
                         side=side_open,
@@ -1901,7 +2009,9 @@ class ExchangeManager:
                             'slTriggerPx': sl_price_sig if sl_price_sig else None,
                         }
                     )
+                    logging.info(f"ExecuteSignal TURNOVER: create order side={order_open.side} type={order_open.order_type} amount={order_open.amount} leverage={order_open.leverage} margin_mode={order_open.margin_mode}")
                     res_open = await exchange.create_order(order_open)
+                    logging.info(f"ExecuteSignal TURNOVER: create result success={res_open.success} order_id={res_open.order_id} executed_price={res_open.executed_price} executed_amount={res_open.executed_amount}")
                     if not all_closed:
                         msg = "; ".join([r.error_message or "" for r in results_close if not r.success]) or "Close failed during turnover"
                         return OrderResult(success=False, error_message=msg, extra_info={'closed_orders': [r.to_dict() for r in results_close], 'open_order': res_open.to_dict() if res_open else None})
@@ -1918,7 +2028,9 @@ class ExchangeManager:
             # UPDATE: amend open orders price and TP/SL, or modify position TP/SL
             if signal.action == 'UPDATE':
                 try:
+                    logging.info(f"ExecuteSignal UPDATE: fetching open orders for {signal.symbol}")
                     open_orders = await exchange.get_open_orders(signal.symbol)
+                    logging.info(f"ExecuteSignal UPDATE: open_orders_count={len(open_orders or [])}")
                     updated_any = False
                     tp_px = None
                     if signal.take_profit_levels:
@@ -1928,16 +2040,20 @@ class ExchangeManager:
                         except Exception:
                             tp_px = None
                     sl_px = signal.stop_loss if signal.stop_loss and signal.stop_loss > 0 else None
+                    logging.info(f"ExecuteSignal UPDATE: target tp_px={tp_px} sl_px={sl_px} entry_price={signal.entry_price}")
                     for oi in open_orders:
                         if not oi or oi.type.lower() != 'limit':
                             continue
+                        logging.info(f"ExecuteSignal UPDATE: existing order oi={oi} id={oi.id} clOrdId={getattr(oi, 'cl_ord_id', None)} price={oi.price} tp={getattr(oi, 'tp_trigger_px', None)} sl={getattr(oi, 'sl_trigger_px', None)}")
                         new_price = signal.entry_price if signal.entry_price else oi.price
                         if getattr(exchange, 'exchange_name', '') == 'OKX':
+                            logging.info(f"ExecuteSignal UPDATE: amend OKX order id={oi.id} clOrdId={getattr(oi, 'cl_ord_id', None)} old_price={oi.price} new_price={new_price}")
                             raw = await exchange._okx_amend_order(exchange._normalize_symbol(oi.symbol), oi.id, getattr(oi, 'cl_ord_id', None), new_price)
                             if str(raw.get('code')) == '0':
                                 updated_any = True
                                 if tp_px or sl_px:
                                     try:
+                                        logging.info(f"ExecuteSignal UPDATE: attach TP/SL for amended order id={oi.id} tp={tp_px} sl={sl_px}")
                                         await exchange.attach_tp_sl(oi.symbol, oi.side, oi.amount, signal.margin_mode or 'cross', tp_px, sl_px)
                                     except Exception as e:
                                         logging.warning(f"Failed to update TP/SL for amended order: {e}")
@@ -1945,6 +2061,7 @@ class ExchangeManager:
                                 logging.warning(f"OKX amend failed: {raw}")
                         else:
                             try:
+                                logging.info(f"ExecuteSignal UPDATE: cancel and recreate order id={oi.id} symbol={oi.symbol}")
                                 await exchange.cancel_order(oi.id, oi.symbol, getattr(oi, 'cl_ord_id', None))
                                 price_use = new_price or oi.price
                                 leverage_use = signal.leverage or 10
@@ -1963,14 +2080,18 @@ class ExchangeManager:
                                 updated_any = updated_any or res.success
                                 if res.success and (tp_px or sl_px):
                                     try:
+                                        logging.info(f"ExecuteSignal UPDATE: attach TP/SL after recreate tp={tp_px} sl={sl_px} amount={res.executed_amount or oi.amount}")
                                         await exchange.attach_tp_sl(oi.symbol, oi.side, res.executed_amount or oi.amount, signal.margin_mode or 'cross', tp_px, sl_px)
                                     except Exception as e:
                                         logging.warning(f"Failed to attach TP/SL after recreate: {e}")
                             except Exception as e:
                                 logging.warning(f"Fallback amend failed: {e}")
                     if updated_any:
+                        logging.info("ExecuteSignal UPDATE: open orders updated successfully")
                         return OrderResult(success=True)
+                    logging.info("ExecuteSignal UPDATE: no open limit orders updated, modifying position TP/SL")
                     ok = await self.modify_position(signal.exchange, signal.symbol, stop_loss=sl_px, take_profit=tp_px)
+                    logging.info(f"ExecuteSignal UPDATE: modify_position result={ok}")
                     return OrderResult(success=ok, error_message=None if ok else "No open orders; position update failed")
                 except Exception as e:
                     logging.error(f"Error executing UPDATE: {e}")
@@ -1990,6 +2111,7 @@ class ExchangeManager:
                         Percentage: {zone.percentage}
                         USDT Amount: {zone_amount}
                         """)
+                    logging.info(f"ExecuteSignal ENTRY_ZONES: preparing order side={'BUY' if signal.action == 'OPEN_LONG' else 'SELL'} amount={zone_amount} price={zone.price} leverage={signal.leverage} margin_mode={signal.margin_mode}")
 
                     # Prepare TP/SL
                     tp_price_sig = None
@@ -2015,7 +2137,9 @@ class ExchangeManager:
                         }
                     )
 
+                    logging.info(f"ExecuteSignal ENTRY_ZONES: create order side={order.side} type={order.order_type} amount={order.amount} price={order.price} leverage={order.leverage} margin_mode={order.margin_mode} tp={tp_price_sig} sl={sl_price_sig}")
                     result = await exchange.create_order(order)
+                    logging.info(f"ExecuteSignal ENTRY_ZONES: order result success={result.success} order_id={result.order_id} executed_price={result.executed_price} executed_amount={result.executed_amount}")
                     results.append(result)
                     
                     if result.success:
@@ -2078,6 +2202,7 @@ class ExchangeManager:
                 price = signal.entry_price
                 if str(signal.order_type).upper() == "MARKET":
                     price = None
+                logging.info(f"ExecuteSignal SINGLE_ENTRY: preparing order side={'BUY' if signal.action == 'OPEN_LONG' else 'SELL'} type={'MARKET' if str(signal.order_type).upper() == 'MARKET' else 'LIMIT'} amount={signal.position_size} price={price} leverage={signal.leverage} margin_mode={signal.margin_mode} tp={tp_price_sig} sl={sl_price_sig}")
                 order = OrderParams(
                     symbol=signal.symbol,
                     side=OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
@@ -2093,6 +2218,7 @@ class ExchangeManager:
                 )
 
                 result = await exchange.create_order(order)
+                logging.info(f"ExecuteSignal SINGLE_ENTRY: order result success={result.success} order_id={result.order_id} executed_price={result.executed_price} executed_amount={result.executed_amount}")
                 if result.success:
                     tp_price = None
                     if signal.take_profit_levels:
@@ -2114,6 +2240,7 @@ class ExchangeManager:
                             positions = await exchange.get_positions(signal.symbol)
                             if positions:
                                 pos = positions[0]
+                                logging.info(f"ExecuteSignal SINGLE_ENTRY: attach TP/SL after position size={pos.size} tp={tp_price} sl={sl_price} margin_mode={pos.margin_mode}")
                                 attached = await exchange.attach_tp_sl(
                                     signal.symbol,
                                     OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
