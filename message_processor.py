@@ -272,21 +272,34 @@ class MessageProcessor:
         await bot.send_message(chat_id=target_user_id, text=text)
     async def resend_message_to_user(self, update, context, target_user_id: int, prefer_copy: bool = True):
         try:
-            if prefer_copy and getattr(update, 'message', None) and update.message.message_id:
-                await context.bot.copy_message(
+            if getattr(update, 'message', None) and update.message.message_id:
+                try:
+                    await context.bot.forward_message(
+                        chat_id=target_user_id,
+                        from_chat_id=update.message.chat_id,
+                        message_id=update.message.message_id,
+                    )
+                    return
+                except Exception as e:
+                    logging.warning(f"Forward message failed: {e}")
+                if prefer_copy:
+                    try:
+                        await context.bot.copy_message(
+                            chat_id=target_user_id,
+                            from_chat_id=update.message.chat_id,
+                            message_id=update.message.message_id,
+                        )
+                        return
+                    except Exception as e:
+                        logging.warning(f"Copy message failed: {e}")
+            text = getattr(update.message, 'text', None) or getattr(update.message, 'caption', None) or ''
+            if text:
+                await context.bot.send_message(
                     chat_id=target_user_id,
-                    from_chat_id=update.message.chat_id,
-                    message_id=update.message.message_id,
+                    text=text,
                 )
             else:
-                text = getattr(update.message, 'text', None) or getattr(update.message, 'caption', None) or ''
-                if text:
-                    await context.bot.send_message(
-                        chat_id=target_user_id,
-                        text=text,
-                    )
-                else:
-                    logging.error("No text or caption to resend")
+                logging.error("No text or caption to resend")
         except Exception as e:
             logging.error(f"Error resending message: {e}")
     # message_processor.py 中的 MessageProcessor 类
@@ -350,27 +363,41 @@ class MessageProcessor:
                 return None
             # 完全转发原始消息（包括媒体、表情等所有内容）
             try:
-                # 优先使用 copy_message 完整转发
-                await bot.copy_message(
+                await bot.forward_message(
                     chat_id=-4813705648,
                     from_chat_id=channel_id,
                     message_id=message.id
                 )
             except Exception as e:
-                logging.error(f"转发消息到群组失败: {e}")
+                logging.warning(f"转发消息到群组失败: {e}")
                 try:
-                    # 如果复制失败，尝试提取文本或 caption 转发
-                    fallback_text = getattr(message, 'text', None) or getattr(message, 'caption', None)
-                    if fallback_text:
-                        await self.resend_message_text_to_user(
-                            bot=bot,
-                            target_user_id=-4813705648,
-                            text=fallback_text
-                        )
-                    else:
-                        logging.error("无法提取任何可转发的内容")
+                    await self.resend_message_to_user(
+                        bot=bot,
+                        target_user_id=-4813705648,
+                        message=message
+                    )
                 except Exception as e:
-                    logging.error(f"转发消息到群组失败: {e}")
+                    logging.error(f"复制消息到群组失败: {e}")
+                    try:
+                        await bot.copy_message(
+                            chat_id=-4813705648,
+                            from_chat_id=channel_id,
+                            message_id=message.id
+                        )
+                    except Exception as e:
+                        logging.error(f"复制消息到群组失败: {e}")
+                        try:
+                            fallback_text = getattr(message, 'text', None) or getattr(message, 'caption', None)
+                            if fallback_text:
+                                await self.resend_message_text_to_user(
+                                    bot=bot,
+                                    target_user_id=-4813705648,
+                                    text=fallback_text
+                                )
+                            else:
+                                logging.error("无法提取任何可转发的内容")
+                        except Exception as e:
+                            logging.error(f"转发消息到群组失败: {e}")
             cleaned_message = self.preprocess_message(channel_message.text)
 
             context_append = ""
