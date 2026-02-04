@@ -357,22 +357,20 @@ class MessageProcessor:
                     message_id=message.id
                 )
             except Exception as e:
-                # 如果复制失败，尝试提取文本或 caption 转发
-                fallback_text = getattr(message, 'text', None) or getattr(message, 'caption', None)
-                if fallback_text:
-                    await self.resend_message_text_to_user(
-                        bot=bot,
-                        target_user_id=584536494,
-                        text=fallback_text
-                    )
-                    await self.resend_message_text_to_user(
-                        bot=bot,
-                        target_user_id=8184692730,
-                        text=fallback_text
-                    )
-                else:
-                    logging.error("无法提取任何可转发的内容")
-
+                logging.error(f"转发消息到群组失败: {e}")
+                try:
+                    # 如果复制失败，尝试提取文本或 caption 转发
+                    fallback_text = getattr(message, 'text', None) or getattr(message, 'caption', None)
+                    if fallback_text:
+                        await self.resend_message_text_to_user(
+                            bot=bot,
+                            target_user_id=-4813705648,
+                            text=fallback_text
+                        )
+                    else:
+                        logging.error("无法提取任何可转发的内容")
+                except Exception as e:
+                    logging.error(f"转发消息到群组失败: {e}")
             cleaned_message = self.preprocess_message(channel_message.text)
 
             context_append = ""
