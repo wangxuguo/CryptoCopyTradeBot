@@ -731,6 +731,43 @@ class ExchangeClient(ABC):
                     logging.warning(f"OKX cancel existing TP/SL failed: {raw}")
         except Exception as e:
             logging.warning(f"OKX cancel existing TP/SL error: {e}")
+    
+    async def _okx_update_tp_sl_if_exists(self, symbol: str, side_close: str, pos_side: Optional[str],
+                                          margin_mode: str, amount_contracts: int,
+                                          tp_price: Optional[float], sl_price: Optional[float]) -> bool:
+        try:
+            pending = await self._okx_list_algo_orders(symbol)
+            side_close_l = side_close.lower()
+            pos_side_l = pos_side.lower() if pos_side else None
+            exist = False
+            for o in pending:
+                side = str(o.get('side', '')).lower()
+                ps = str(o.get('posSide', '')).lower() if o.get('posSide') else None
+                ord_type = str(o.get('ordType', '')).lower()
+                algo_type = str(o.get('algoOrdType', '')).lower() if o.get('algoOrdType') else None
+                has_tp_sl = (
+                    (o.get('tpTriggerPx') is not None) or
+                    (o.get('slTriggerPx') is not None) or
+                    (ord_type in ('conditional', 'oco')) or
+                    (algo_type in ('tp', 'sl'))
+                )
+                if not has_tp_sl:
+                    continue
+                if (side == side_close_l) and (pos_side_l is None or (ps and ps == pos_side_l)):
+                    exist = True
+                    break
+            if not exist:
+                logging.info("OKX update TP/SL: no existing TP/SL algo orders found, skip updating")
+                return False
+            await self._okx_cancel_existing_tp_sl(symbol, side_close, pos_side)
+            raw = await self._okx_attach_tp_sl(symbol, side_close, amount_contracts, margin_mode, pos_side, tp_price, sl_price)
+            ok = str(raw.get('code')) == '0'
+            if not ok:
+                logging.warning(f"OKX update TP/SL failed: {raw}")
+            return ok
+        except Exception as e:
+            logging.error(f"Error updating OKX TP/SL: {e}")
+            return False
 
     @abstractmethod
     async def _setup_exchange(self) -> bool:
@@ -1407,26 +1444,6 @@ class ExchangeClient(ABC):
             pos_side = None
             if getattr(self, 'pos_mode', None) == 'long_short':
                 pos_side = 'long' if side_open.lower() == 'buy' else 'short'
-            # Prevent immediate trigger when updating TP/SL
-            # try:
-            #     mkt = await self.get_market_info(symbol)
-            #     last = mkt.last_price if mkt else None
-            #     if last is not None:
-            #         step = 10 ** (-int(mkt.price_precision)) if (hasattr(mkt, 'price_precision') and isinstance(mkt.price_precision, int)) else max(1e-6, last * 1e-6)
-            #         tp = take_profit
-            #         sl = stop_loss
-            #         if side_close.lower() == 'sell':
-            #             if tp is not None and last >= float(tp):
-            #                 take_profit = float(last) + float(step)
-            #             if sl is not None and last <= float(sl):
-            #                 stop_loss = float(last) - float(step)
-            #         else:
-            #             if tp is not None and last <= float(tp):
-            #                 take_profit = float(last) - float(step)
-            #             if sl is not None and last >= float(sl):
-            #                 stop_loss = float(last) + float(step)
-            # except Exception:
-            #     pass
             try:
                 await self._okx_cancel_existing_tp_sl(self._normalize_symbol(symbol), side_close, pos_side)
             except Exception as e:
@@ -2025,13 +2042,14 @@ class ExchangeManager:
                 except Exception as e:
                     logging.error(f"Error handling TURNOVER action: {e}")
                     return OrderResult(success=False, error_message=str(e))
-            # UPDATE: amend open orders price and TP/SL, or modify position TP/SL
+            # UPDATE: for unfilled open limit orders, cancel and recreate with new params;
+            # otherwise only update existing TP/SL (no new TP/SL orders)
             elif signal.action == 'UPDATE':
                 try:
                     logging.info(f"ExecuteSignal UPDATE: fetching open orders for {signal.symbol}")
                     open_orders = await exchange.get_open_orders(signal.symbol)
                     logging.info(f"ExecuteSignal UPDATE: open_orders_count={len(open_orders or [])}")
-                    updated_any = False
+                    recreated_any = False
                     tp_px = None
                     if signal.take_profit_levels:
                         try:
@@ -2045,25 +2063,14 @@ class ExchangeManager:
                         if not oi or oi.type.lower() != 'limit':
                             continue
                         logging.info(f"ExecuteSignal UPDATE: existing order oi={oi} id={oi.id} clOrdId={getattr(oi, 'cl_ord_id', None)} price={oi.price} tp={getattr(oi, 'tp_trigger_px', None)} sl={getattr(oi, 'sl_trigger_px', None)}")
-                        new_price = signal.entry_price if signal.entry_price else oi.price
-                        if getattr(exchange, 'exchange_name', '') == 'OKX':
-                            logging.info(f"ExecuteSignal UPDATE: amend OKX order id={oi.id} clOrdId={getattr(oi, 'cl_ord_id', None)} old_price={oi.price} new_price={new_price}")
-                            raw = await exchange._okx_amend_order(exchange._normalize_symbol(oi.symbol), oi.id, getattr(oi, 'cl_ord_id', None), new_price)
-                            if str(raw.get('code')) == '0':
-                                updated_any = True
-                                if tp_px or sl_px:
-                                    try:
-                                        logging.info(f"ExecuteSignal UPDATE: attach TP/SL for amended order id={oi.id} tp={tp_px} sl={sl_px}")
-                                        await exchange.attach_tp_sl(oi.symbol, oi.side, oi.amount, signal.margin_mode or 'cross', tp_px, sl_px)
-                                    except Exception as e:
-                                        logging.warning(f"Failed to update TP/SL for amended order: {e}")
-                            else:
-                                logging.warning(f"OKX amend failed: {raw}")
-                        else:
+                        filled_amt = getattr(oi, 'filled', None)
+                        status = str(getattr(oi, 'status', '') or '').lower()
+                        is_unfilled = (filled_amt is None or float(filled_amt) <= 0.0) and status in ('', 'open', 'new', 'pending')
+                        if is_unfilled:
                             try:
                                 logging.info(f"ExecuteSignal UPDATE: cancel and recreate order id={oi.id} symbol={oi.symbol}")
                                 await exchange.cancel_order(oi.id, oi.symbol, getattr(oi, 'cl_ord_id', None))
-                                price_use = new_price or oi.price
+                                price_use = signal.entry_price if signal.entry_price else oi.price
                                 leverage_use = signal.leverage or 10
                                 usdt_amount = max(1.0, (oi.amount * (price_use or 0.0)) / max(1, leverage_use))
                                 order = OrderParams(
@@ -2074,25 +2081,47 @@ class ExchangeManager:
                                     price=price_use,
                                     leverage=leverage_use,
                                     margin_mode=signal.margin_mode or 'cross',
-                                    extra_params={}
+                                    extra_params={
+                                        'tpTriggerPx': tp_px if tp_px is not None else None,
+                                        'slTriggerPx': sl_px if sl_px is not None else None,
+                                    }
                                 )
                                 res = await exchange.create_order(order)
-                                updated_any = updated_any or res.success
-                                if res.success and (tp_px or sl_px):
-                                    try:
-                                        logging.info(f"ExecuteSignal UPDATE: attach TP/SL after recreate tp={tp_px} sl={sl_px} amount={res.executed_amount or oi.amount}")
-                                        await exchange.attach_tp_sl(oi.symbol, oi.side, res.executed_amount or oi.amount, signal.margin_mode or 'cross', tp_px, sl_px)
-                                    except Exception as e:
-                                        logging.warning(f"Failed to attach TP/SL after recreate: {e}")
+                                recreated_any = recreated_any or res.success
                             except Exception as e:
-                                logging.warning(f"Fallback amend failed: {e}")
-                    if updated_any:
-                        logging.info("ExecuteSignal UPDATE: open orders updated successfully")
+                                logging.warning(f"Recreate order failed: {e}")
+                        else:
+                            logging.info(f"ExecuteSignal UPDATE: skip price change for partially filled/active order id={oi.id}, will only update TP/SL if exists")
+                    if recreated_any:
+                        logging.info("ExecuteSignal UPDATE: open orders recreated successfully (no TP/SL changes)")
                         return OrderResult(success=True)
-                    logging.info("ExecuteSignal UPDATE: no open limit orders updated, modifying position TP/SL")
-                    ok = await self.modify_position(signal.exchange, signal.symbol, stop_loss=sl_px, take_profit=tp_px)
-                    logging.info(f"ExecuteSignal UPDATE: modify_position result={ok}")
-                    return OrderResult(success=ok, error_message=None if ok else "No open orders; position update failed")
+                    logging.info("ExecuteSignal UPDATE: updating existing TP/SL only (no creation)")
+                    ok = False
+                    if getattr(exchange, 'exchange_name', '') == 'OKX':
+                        try:
+                            positions = await exchange.get_positions(signal.symbol)
+                            if positions:
+                                pos = positions[0]
+                                side_close = 'sell' if pos.side == PositionSide.LONG else 'buy'
+                                pos_side = 'long' if pos.side == PositionSide.LONG else 'short'
+                                amount_contracts = max(1, int(math.floor(pos.size)))
+                                ok = await exchange._okx_update_tp_sl_if_exists(
+                                    exchange._normalize_symbol(signal.symbol),
+                                    side_close,
+                                    pos_side if getattr(exchange, 'pos_mode', None) == 'long_short' else None,
+                                    pos.margin_mode.value if hasattr(pos.margin_mode, 'value') else str(pos.margin_mode),
+                                    amount_contracts,
+                                    tp_px,
+                                    sl_px
+                                )
+                                logging.info(f"ExecuteSignal UPDATE: OKX update existing TP/SL result={ok}")
+                            else:
+                                logging.info("ExecuteSignal UPDATE: no positions; skip TP/SL update")
+                        except Exception as e:
+                            logging.warning(f"ExecuteSignal UPDATE: error updating existing TP/SL on OKX: {e}")
+                    else:
+                        logging.info("ExecuteSignal UPDATE: existing TP/SL update not supported for this exchange")
+                    return OrderResult(success=ok, error_message=None if ok else "No changes applied")
                 except Exception as e:
                     logging.error(f"Error executing UPDATE: {e}")
                     return OrderResult(success=False, error_message=str(e))
