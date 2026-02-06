@@ -1916,7 +1916,7 @@ class ExchangeManager:
                     logging.error(f"Error handling CLOSE action: {e}")
                     return OrderResult(success=False, error_message=str(e))
             # CANCEL: 撤销当前委托订单
-            if signal.action == 'CANCEL':
+            elif signal.action == 'CANCEL':
                 try:
                     logging.info(f"ExecuteSignal CANCEL: fetching open orders for {signal.symbol}")
                     open_orders = await exchange.get_open_orders(signal.symbol)
@@ -1934,7 +1934,7 @@ class ExchangeManager:
                     logging.error(f"Error handling CANCEL action: {e}")
                     return OrderResult(success=False, error_message=str(e))
             #TURNOVER reverse the order side，close current orders and create a new order with opposite side
-            if signal.action == 'TURNOVER':
+            elif signal.action == 'TURNOVER':
                 try:
                     logging.info(f"ExecuteSignal TURNOVER: fetching positions for {signal.symbol}")
                     positions = await exchange.get_positions(signal.symbol)
@@ -2026,7 +2026,7 @@ class ExchangeManager:
                     logging.error(f"Error handling TURNOVER action: {e}")
                     return OrderResult(success=False, error_message=str(e))
             # UPDATE: amend open orders price and TP/SL, or modify position TP/SL
-            if signal.action == 'UPDATE':
+            elif signal.action == 'UPDATE':
                 try:
                     logging.info(f"ExecuteSignal UPDATE: fetching open orders for {signal.symbol}")
                     open_orders = await exchange.get_open_orders(signal.symbol)
@@ -2096,23 +2096,101 @@ class ExchangeManager:
                 except Exception as e:
                     logging.error(f"Error executing UPDATE: {e}")
                     return OrderResult(success=False, error_message=str(e))
+            # action OPEN_LONG or OPEN_SHORT
+            else:
+                if signal.entry_zones: # potential entry zones
+                    results = []
+                    total_amount = signal.position_size
 
-            if signal.entry_zones:
-                results = []
-                total_amount = signal.position_size
+                    for index,zone in enumerate(signal.entry_zones):
+                        # Calculate USDT amount for this zone
+                        zone_amount = total_amount * zone.percentage
 
-                for index,zone in enumerate(signal.entry_zones):
-                    # Calculate USDT amount for this zone
-                    zone_amount = total_amount * zone.percentage
+                        logging.info(f"""
+                            Processing Entry Zone:
+                            Price: {zone.price}
+                            Percentage: {zone.percentage}
+                            USDT Amount: {zone_amount}
+                            """)
+                        logging.info(f"ExecuteSignal ENTRY_ZONES: preparing order side={'BUY' if signal.action == 'OPEN_LONG' else 'SELL'} amount={zone_amount} price={zone.price} leverage={signal.leverage} margin_mode={signal.margin_mode}")
 
-                    logging.info(f"""
-                        Processing Entry Zone:
-                        Price: {zone.price}
-                        Percentage: {zone.percentage}
-                        USDT Amount: {zone_amount}
-                        """)
-                    logging.info(f"ExecuteSignal ENTRY_ZONES: preparing order side={'BUY' if signal.action == 'OPEN_LONG' else 'SELL'} amount={zone_amount} price={zone.price} leverage={signal.leverage} margin_mode={signal.margin_mode}")
+                        # Prepare TP/SL
+                        tp_price_sig = None
+                        if signal.take_profit_levels:
+                            try:
+                                levels = signal.take_profit_levels
+                                tp_price_sig = levels[1].price if len(levels) > 1 else levels[0].price
+                            except Exception:
+                                tp_price_sig = None
+                        sl_price_sig = signal.stop_loss
 
+                        order = OrderParams(
+                            symbol=signal.symbol,
+                            side=OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
+                            order_type=OrderType.LIMIT,  # 限价单
+                            amount=zone_amount,
+                            price=zone.price,  # 使用区间价格
+                            leverage=signal.leverage,
+                            margin_mode=signal.margin_mode,
+                            extra_params={
+                                'tpTriggerPx': tp_price_sig if tp_price_sig else None,
+                                'slTriggerPx': sl_price_sig if sl_price_sig else None,
+                            }
+                        )
+
+                        logging.info(f"ExecuteSignal ENTRY_ZONES: create order side={order.side} type={order.order_type} amount={order.amount} price={order.price} leverage={order.leverage} margin_mode={order.margin_mode} tp={tp_price_sig} sl={sl_price_sig}")
+                        result = await exchange.create_order(order)
+                        logging.info(f"ExecuteSignal ENTRY_ZONES: order result success={result.success} order_id={result.order_id} executed_price={result.executed_price} executed_amount={result.executed_amount}")
+                        results.append(result)
+
+                        if result.success:
+                            logging.info(f"Successfully created order for zone {zone.price}")
+                            # 更新区间状态
+                            zone.order_id = result.order_id
+                            zone.status = 'PLACED'
+                            tp_price = None
+                            sl_price = signal.stop_loss
+                            try:
+                                if order.extra_params:
+                                    tp_price = order.extra_params.get('tpTriggerPx') or order.extra_params.get('takeProfitPrice') or tp_price
+                                    sl_price = order.extra_params.get('slTriggerPx') or order.extra_params.get('stopLossPrice') or sl_price
+                            except Exception:
+                                pass
+                            # Attach TP/SL only after position exists
+                            try:
+                                inline_set = bool(order.extra_params.get('tpTriggerPx') or order.extra_params.get('slTriggerPx'))
+                                if getattr(exchange, 'exchange_name', '') == 'OKX' and inline_set:
+                                    logging.info("Skip attach_tp_sl: TP/SL attached via attachAlgoOrds")
+                                else:
+                                    positions = await exchange.get_positions(signal.symbol)
+                                    if positions:
+                                        pos = positions[0]
+                                        attached = await exchange.attach_tp_sl(
+                                            signal.symbol,
+                                            OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
+                                            pos.size,
+                                            pos.margin_mode.value if hasattr(pos.margin_mode, 'value') else str(pos.margin_mode),
+                                            tp_price,
+                                            sl_price
+                                        )
+                                        if attached:
+                                            logging.info("Attached TP/SL for zone order (position confirmed)")
+                                        else:
+                                            logging.warning("Failed to attach TP/SL for zone order")
+                                    else:
+                                        logging.info("Skipped TP/SL attach: no open position yet (inline TP/SL applied if supported)")
+                            except Exception as e:
+                                logging.error(f"Error attaching TP/SL: {e}")
+                        else:
+                            logging.error(f"Failed to create order for zone: {zone}")
+
+                    # Return first result (for compatibility)
+                    return results[0] if results else OrderResult(
+                        success=False,
+                        error_message="No orders created"
+                    )
+                else:
+                    # Single entry price or market order
                     # Prepare TP/SL
                     tp_price_sig = None
                     if signal.take_profit_levels:
@@ -2122,13 +2200,16 @@ class ExchangeManager:
                         except Exception:
                             tp_price_sig = None
                     sl_price_sig = signal.stop_loss
-
+                    price = signal.entry_price
+                    if str(signal.order_type).upper() == "MARKET":
+                        price = None
+                    logging.info(f"ExecuteSignal SINGLE_ENTRY: preparing order side={'BUY' if signal.action == 'OPEN_LONG' else 'SELL'} type={'MARKET' if str(signal.order_type).upper() == 'MARKET' else 'LIMIT'} amount={signal.position_size} price={price} leverage={signal.leverage} margin_mode={signal.margin_mode} tp={tp_price_sig} sl={sl_price_sig}")
                     order = OrderParams(
                         symbol=signal.symbol,
                         side=OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
-                        order_type=OrderType.LIMIT,  # 限价单
-                        amount=zone_amount,
-                        price=zone.price,  # 使用区间价格
+                        order_type=OrderType.MARKET if str(signal.order_type).upper() == "MARKET" else OrderType.LIMIT,
+                        amount=signal.position_size,
+                        price=price,  # 可能为None（市价单）
                         leverage=signal.leverage,
                         margin_mode=signal.margin_mode,
                         extra_params={
@@ -2137,17 +2218,13 @@ class ExchangeManager:
                         }
                     )
 
-                    logging.info(f"ExecuteSignal ENTRY_ZONES: create order side={order.side} type={order.order_type} amount={order.amount} price={order.price} leverage={order.leverage} margin_mode={order.margin_mode} tp={tp_price_sig} sl={sl_price_sig}")
                     result = await exchange.create_order(order)
-                    logging.info(f"ExecuteSignal ENTRY_ZONES: order result success={result.success} order_id={result.order_id} executed_price={result.executed_price} executed_amount={result.executed_amount}")
-                    results.append(result)
-                    
+                    logging.info(f"ExecuteSignal SINGLE_ENTRY: order result success={result.success} order_id={result.order_id} executed_price={result.executed_price} executed_amount={result.executed_amount}")
                     if result.success:
-                        logging.info(f"Successfully created order for zone {zone.price}")
-                        # 更新区间状态
-                        zone.order_id = result.order_id
-                        zone.status = 'PLACED'
                         tp_price = None
+                        if signal.take_profit_levels:
+                            levels = signal.take_profit_levels
+                            tp_price = levels[1].price if len(levels) > 1 else levels[0].price
                         sl_price = signal.stop_loss
                         try:
                             if order.extra_params:
@@ -2164,6 +2241,7 @@ class ExchangeManager:
                                 positions = await exchange.get_positions(signal.symbol)
                                 if positions:
                                     pos = positions[0]
+                                    logging.info(f"ExecuteSignal SINGLE_ENTRY: attach TP/SL after position size={pos.size} tp={tp_price} sl={sl_price} margin_mode={pos.margin_mode}")
                                     attached = await exchange.attach_tp_sl(
                                         signal.symbol,
                                         OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
@@ -2173,91 +2251,14 @@ class ExchangeManager:
                                         sl_price
                                     )
                                     if attached:
-                                        logging.info("Attached TP/SL for zone order (position confirmed)")
+                                        logging.info("Attached TP/SL for entry order (position confirmed)")
                                     else:
-                                        logging.warning("Failed to attach TP/SL for zone order")
+                                        logging.warning("Failed to attach TP/SL for entry order")
                                 else:
                                     logging.info("Skipped TP/SL attach: no open position yet (inline TP/SL applied if supported)")
                         except Exception as e:
                             logging.error(f"Error attaching TP/SL: {e}")
-                    else:
-                        logging.error(f"Failed to create order for zone: {zone}")
-
-                # Return first result (for compatibility)
-                return results[0] if results else OrderResult(
-                    success=False,
-                    error_message="No orders created"
-                )
-            else:
-                # Single entry price or market order
-                # Prepare TP/SL
-                tp_price_sig = None
-                if signal.take_profit_levels:
-                    try:
-                        levels = signal.take_profit_levels
-                        tp_price_sig = levels[1].price if len(levels) > 1 else levels[0].price
-                    except Exception:
-                        tp_price_sig = None
-                sl_price_sig = signal.stop_loss
-                price = signal.entry_price
-                if str(signal.order_type).upper() == "MARKET":
-                    price = None
-                logging.info(f"ExecuteSignal SINGLE_ENTRY: preparing order side={'BUY' if signal.action == 'OPEN_LONG' else 'SELL'} type={'MARKET' if str(signal.order_type).upper() == 'MARKET' else 'LIMIT'} amount={signal.position_size} price={price} leverage={signal.leverage} margin_mode={signal.margin_mode} tp={tp_price_sig} sl={sl_price_sig}")
-                order = OrderParams(
-                    symbol=signal.symbol,
-                    side=OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
-                    order_type=OrderType.MARKET if str(signal.order_type).upper() == "MARKET" else OrderType.LIMIT,
-                    amount=signal.position_size,
-                    price=price,  # 可能为None（市价单）
-                    leverage=signal.leverage,
-                    margin_mode=signal.margin_mode,
-                    extra_params={
-                        'tpTriggerPx': tp_price_sig if tp_price_sig else None,
-                        'slTriggerPx': sl_price_sig if sl_price_sig else None,
-                    }
-                )
-
-                result = await exchange.create_order(order)
-                logging.info(f"ExecuteSignal SINGLE_ENTRY: order result success={result.success} order_id={result.order_id} executed_price={result.executed_price} executed_amount={result.executed_amount}")
-                if result.success:
-                    tp_price = None
-                    if signal.take_profit_levels:
-                        levels = signal.take_profit_levels
-                        tp_price = levels[1].price if len(levels) > 1 else levels[0].price
-                    sl_price = signal.stop_loss
-                    try:
-                        if order.extra_params:
-                            tp_price = order.extra_params.get('tpTriggerPx') or order.extra_params.get('takeProfitPrice') or tp_price
-                            sl_price = order.extra_params.get('slTriggerPx') or order.extra_params.get('stopLossPrice') or sl_price
-                    except Exception:
-                        pass
-                    # Attach TP/SL only after position exists
-                    try:
-                        inline_set = bool(order.extra_params.get('tpTriggerPx') or order.extra_params.get('slTriggerPx'))
-                        if getattr(exchange, 'exchange_name', '') == 'OKX' and inline_set:
-                            logging.info("Skip attach_tp_sl: TP/SL attached via attachAlgoOrds")
-                        else:
-                            positions = await exchange.get_positions(signal.symbol)
-                            if positions:
-                                pos = positions[0]
-                                logging.info(f"ExecuteSignal SINGLE_ENTRY: attach TP/SL after position size={pos.size} tp={tp_price} sl={sl_price} margin_mode={pos.margin_mode}")
-                                attached = await exchange.attach_tp_sl(
-                                    signal.symbol,
-                                    OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
-                                    pos.size,
-                                    pos.margin_mode.value if hasattr(pos.margin_mode, 'value') else str(pos.margin_mode),
-                                    tp_price,
-                                    sl_price
-                                )
-                                if attached:
-                                    logging.info("Attached TP/SL for entry order (position confirmed)")
-                                else:
-                                    logging.warning("Failed to attach TP/SL for entry order")
-                            else:
-                                logging.info("Skipped TP/SL attach: no open position yet (inline TP/SL applied if supported)")
-                    except Exception as e:
-                        logging.error(f"Error attaching TP/SL: {e}")
-                return result
+                    return result
 
         except Exception as e:
             logging.error(f"Error executing signal: {e}")
