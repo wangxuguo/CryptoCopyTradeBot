@@ -1408,25 +1408,25 @@ class ExchangeClient(ABC):
             if getattr(self, 'pos_mode', None) == 'long_short':
                 pos_side = 'long' if side_open.lower() == 'buy' else 'short'
             # Prevent immediate trigger when updating TP/SL
-            try:
-                mkt = await self.get_market_info(symbol)
-                last = mkt.last_price if mkt else None
-                if last is not None:
-                    step = 10 ** (-int(mkt.price_precision)) if (hasattr(mkt, 'price_precision') and isinstance(mkt.price_precision, int)) else max(1e-6, last * 1e-6)
-                    tp = take_profit
-                    sl = stop_loss
-                    if side_close.lower() == 'sell':
-                        if tp is not None and last >= float(tp):
-                            take_profit = float(last) + float(step)
-                        if sl is not None and last <= float(sl):
-                            stop_loss = float(last) - float(step)
-                    else:
-                        if tp is not None and last <= float(tp):
-                            take_profit = float(last) - float(step)
-                        if sl is not None and last >= float(sl):
-                            stop_loss = float(last) + float(step)
-            except Exception:
-                pass
+            # try:
+            #     mkt = await self.get_market_info(symbol)
+            #     last = mkt.last_price if mkt else None
+            #     if last is not None:
+            #         step = 10 ** (-int(mkt.price_precision)) if (hasattr(mkt, 'price_precision') and isinstance(mkt.price_precision, int)) else max(1e-6, last * 1e-6)
+            #         tp = take_profit
+            #         sl = stop_loss
+            #         if side_close.lower() == 'sell':
+            #             if tp is not None and last >= float(tp):
+            #                 take_profit = float(last) + float(step)
+            #             if sl is not None and last <= float(sl):
+            #                 stop_loss = float(last) - float(step)
+            #         else:
+            #             if tp is not None and last <= float(tp):
+            #                 take_profit = float(last) - float(step)
+            #             if sl is not None and last >= float(sl):
+            #                 stop_loss = float(last) + float(step)
+            # except Exception:
+            #     pass
             try:
                 await self._okx_cancel_existing_tp_sl(self._normalize_symbol(symbol), side_close, pos_side)
             except Exception as e:
