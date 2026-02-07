@@ -473,7 +473,8 @@ CANCEL是当前有委托订单，撤销当前委托订单
             except Exception:
                 open_orders = None
             now_ts = datetime.now()
-            active = bool(open_orders)
+            has_position_text = ("当前持仓" in cleaned_message) or ("当前委托" in cleaned_message)
+            active = bool(open_orders) or has_position_text
             user_content = cleaned_message
             if not active:
                 self._open_active = False
@@ -500,7 +501,7 @@ CANCEL是当前有委托订单，撤销当前委托订单
                 except Exception:
                     oo_text = ""
                 history_text = "\n".join([f"[{r['ts']}] {r['text']}" for r in self._message_history])
-                if ("当前持仓" in cleaned_message) or ("当前委托" in cleaned_message):
+                if has_position_text:
                     user_content = f"{cleaned_message}\n\n【有开仓以来的消息】\n{history_text}"
                 else:
                     user_content = f"{cleaned_message}\n\n【当前持仓/委托】\n{oo_text}\n\n【有开仓以来的消息】\n{history_text}"
