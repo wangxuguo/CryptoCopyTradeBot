@@ -323,12 +323,23 @@ CANCEL是当前有委托订单，撤销当前委托订单
             
             if take_profit_levels:
                 logging.info(f"Created {len(take_profit_levels)} take profit levels")
-                # 确保止盈百分比总和为1
+                action = data.get('action')
                 total_percentage = sum(tp.percentage for tp in take_profit_levels)
-                if not isclose(total_percentage, 1.0, rel_tol=1e-5):
-                    logging.warning(f"Take profit percentages sum to {total_percentage}, normalizing...")
-                    for tp in take_profit_levels:
-                        tp.percentage = tp.percentage / total_percentage
+                if action == 'CLOSE':
+                    has_percentage_scale = any(tp.percentage > 1 for tp in take_profit_levels)
+                    if has_percentage_scale:
+                        for tp in take_profit_levels:
+                            tp.percentage = tp.percentage / 100.0
+                        total_percentage = sum(tp.percentage for tp in take_profit_levels)
+                    if total_percentage > 1.0 + 1e-5:
+                        logging.warning(f"Close percentages sum to {total_percentage}, normalizing...")
+                        for tp in take_profit_levels:
+                            tp.percentage = tp.percentage / total_percentage
+                else:
+                    if not isclose(total_percentage, 1.0, rel_tol=1e-5):
+                        logging.warning(f"Take profit percentages sum to {total_percentage}, normalizing...")
+                        for tp in take_profit_levels:
+                            tp.percentage = tp.percentage / total_percentage
 
             # 获取止损价格
             stop_loss = None

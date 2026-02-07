@@ -1899,14 +1899,26 @@ class ExchangeManager:
                             await exchange.cancel_order(oi.id, oi.symbol, getattr(oi, 'cl_ord_id', None))
                         except Exception:
                             pass
+                    close_ratio = 1.0
+                    if signal.take_profit_levels:
+                        ratio_sum = sum([tp.percentage for tp in signal.take_profit_levels if tp and tp.percentage is not None])
+                        if ratio_sum > 0:
+                            if ratio_sum > 1.0 and ratio_sum <= 100.0:
+                                ratio_sum = ratio_sum / 100.0
+                            close_ratio = min(ratio_sum, 1.0)
+                    logging.info(f"ExecuteSignal CLOSE: close_ratio={close_ratio}")
                     results: List[OrderResult] = []
                     for position in positions:
-                        logging.info(f"ExecuteSignal CLOSE: closing position symbol={signal.symbol} side={'SELL' if position.side == PositionSide.LONG else 'BUY'} size={position.size} leverage={position.leverage} margin_mode={position.margin_mode}")
+                        close_amount = position.size * close_ratio
+                        logging.info(f"ExecuteSignal CLOSE: closing position symbol={signal.symbol} side={'SELL' if position.side == PositionSide.LONG else 'BUY'} size={position.size} close_amount={close_amount} leverage={position.leverage} margin_mode={position.margin_mode}")
+                        if close_amount <= 0:
+                            logging.warning(f"ExecuteSignal CLOSE: skip position with non-positive close_amount={close_amount}")
+                            continue
                         order = OrderParams(
                             symbol=signal.symbol,
                             side=OrderSide.SELL if position.side == PositionSide.LONG else OrderSide.BUY,
                             order_type=OrderType.MARKET,
-                            amount=position.size,
+                            amount=close_amount,
                             reduce_only=True,
                             leverage=position.leverage,
                             margin_mode=position.margin_mode.value if hasattr(position.margin_mode, 'value') else str(position.margin_mode),
