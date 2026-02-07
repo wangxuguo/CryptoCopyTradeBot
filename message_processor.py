@@ -363,25 +363,28 @@ class MessageProcessor:
                 return None
             # 完全转发原始消息（包括媒体、表情等所有内容）
             try:
+                target_group_id = self.db._normalize_channel_id(-4813705648)
+                source_channel_id = self.db._normalize_channel_id(channel_id)
                 await bot.forward_message(
-                    chat_id=-4813705648,
-                    from_chat_id=channel_id,
+                    chat_id=target_group_id,
+                    from_chat_id=source_channel_id,
                     message_id=message.id
                 )
             except Exception as e:
-                logging.warning(f"转发消息到群组失败: {e}")
+                logging.warning(f"转发消息到群组失败: {e} | chat_id={target_group_id} from_chat_id={source_channel_id} message_id={message.id}")
                 try:
                     await self.resend_message_to_user(
                         bot=bot,
-                        target_user_id=-4813705648,
+                        target_user_id=target_group_id,
                         message=message
                     )
                 except Exception as e:
                     logging.error(f"复制消息到群组失败: {e}")
                     try:
+                      
                         await bot.copy_message(
-                            chat_id=-4813705648,
-                            from_chat_id=channel_id,
+                            chat_id=target_group_id,
+                            from_chat_id=source_channel_id,
                             message_id=message.id
                         )
                     except Exception as e:
@@ -391,7 +394,7 @@ class MessageProcessor:
                             if fallback_text:
                                 await self.resend_message_text_to_user(
                                     bot=bot,
-                                    target_user_id=-4813705648,
+                                    target_user_id=target_group_id,
                                     text=fallback_text
                                 )
                             else:
