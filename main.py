@@ -38,7 +38,7 @@ from message_processor import MessageProcessor
 from database import Database
 from main_menu import MainMenuManager
 from settings import SettingsManager, StatisticsManager
-from models import EntryZone, TakeProfitLevel
+from models import EntryZone, TakeProfitLevel, OrderResult
 from trading_logic import TradingLogic, TradingSignal
 from button_texts import ButtonText as BT  # 导入按钮文本配置
 
@@ -63,6 +63,7 @@ class TradingBot:
     
         self.settings_manager = SettingsManager(self)
         self.stats_manager = StatisticsManager(self)
+        self.exchange_manager.set_success_callback(self._notify_execute_success)
         
         # Initialize Telegram bot
         self.application = Application.builder().token(config.TELEGRAM_TOKEN).build()
@@ -121,16 +122,7 @@ class TradingBot:
                     if signal.is_valid():
                         if self.config.trading.auto_trade_enabled:
                             result = await self.exchange_manager.execute_signal(signal)
-                            if result.success:
-                                await self.notify_owner(
-                                    f"{network_indicator} 自动交易执行成功\n\n"
-                                    f"交易对: {signal.symbol}\n"
-                                    f"方向: {'做多' if signal.action == 'OPEN_LONG' else '做空'}\n"
-                                    f"订单ID: {result.order_id}\n"
-                                    f"执行价格: {result.executed_price}\n"
-                                    f"数量: {result.executed_amount}"
-                                )
-                            else:
+                            if not result.success:
                                 await self.notify_owner(
                                     f"{network_indicator} 自动交易执行失败\n\n"
                                     f"交易对: {signal.symbol}\n"
@@ -1098,6 +1090,30 @@ class TradingBot:
     def is_authorized(self, user_id: int) -> bool:
         """检查用户是否有权限使用机器人"""
         return user_id == self.config.OWNER_ID
+
+    async def _notify_execute_success(self, signal: TradingSignal, result: OrderResult):
+        network_indicator = "🏮 测试网" if self.config.trading.use_testnet else "🔵 主网"
+        action_map = {
+            'OPEN_LONG': '做多开仓',
+            'OPEN_SHORT': '做空开仓',
+            'CLOSE': '平仓',
+            'UPDATE': '更新',
+            'CANCEL': '撤单',
+            'TURNOVER': '反手'
+        }
+        message = (
+            f"{network_indicator} 交易执行成功\n\n"
+            f"交易所: {signal.exchange}\n"
+            f"交易对: {signal.symbol}\n"
+            f"动作: {action_map.get(signal.action, signal.action)}\n"
+        )
+        if result.order_id:
+            message += f"订单ID: {result.order_id}\n"
+        if result.executed_price is not None:
+            message += f"执行价格: {result.executed_price}\n"
+        if result.executed_amount is not None:
+            message += f"数量: {result.executed_amount}\n"
+        await self.notify_owner(message)
 
     # 修改通知方法以避免 HTML 解析错误
     async def notify_owner(self, message: str):

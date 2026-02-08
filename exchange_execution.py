@@ -14,7 +14,7 @@ import time
 import logging
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Dict, Any, List, Optional, Tuple, Union
+from typing import Dict, Any, List, Optional, Tuple, Union, Callable, Awaitable
 from dataclasses import dataclass, field
 
 import ccxt
@@ -1766,6 +1766,7 @@ class ExchangeManager:
         self.active_signals: Dict[str, TradingSignal] = {}
         self._monitoring = False
         self.monitor_interval = 1  # seconds
+        self.on_execute_success: Optional[Callable[[TradingSignal, OrderResult], Awaitable[None]]] = None
         
         # Cache
         self._position_cache: Dict[str, Dict[str, PositionInfo]] = {}
@@ -1773,6 +1774,16 @@ class ExchangeManager:
         self._balance_cache: Dict[str, AccountBalance] = {}
         self._balance_cache_time: Dict[str, float] = {}
         self.CACHE_DURATION = 5  # seconds
+
+    def set_success_callback(self, cb: Callable[[TradingSignal, OrderResult], Awaitable[None]]):
+        self.on_execute_success = cb
+
+    async def _notify_execute_success(self, signal: TradingSignal, result: OrderResult):
+        try:
+            if self.on_execute_success and result and result.success:
+                await self.on_execute_success(signal, result)
+        except Exception as e:
+            logging.error(f"Error in on_execute_success callback: {e}")
 
     async def initialize(self) -> bool:
         """Initialize all exchanges"""
@@ -1934,13 +1945,15 @@ class ExchangeManager:
                         msg = "; ".join([r.error_message or "" for r in results if not r.success]) or "Close failed"
                         return OrderResult(success=False, error_message=msg, extra_info={'orders': [r.to_dict() for r in results]})
                     first = results[0]
-                    return OrderResult(
+                    final = OrderResult(
                         success=True,
                         order_id=first.order_id,
                         executed_price=first.executed_price,
                         executed_amount=sum([(r.executed_amount or 0) for r in results]),
                         extra_info={'orders': [r.to_dict() for r in results]}
                     )
+                    await self._notify_execute_success(signal, final)
+                    return final
                 except Exception as e:
                     logging.error(f"Error handling CLOSE action: {e}")
                     return OrderResult(success=False, error_message=str(e))
@@ -1958,7 +1971,9 @@ class ExchangeManager:
                         if oi.type.lower() == 'limit':
                             logging.info(f"ExecuteSignal CANCEL: cancel limit order id={oi.id} symbol={oi.symbol} price={oi.price} amount={oi.amount}")
                             await exchange.cancel_order(oi.id, oi.symbol, getattr(oi, 'cl_ord_id', None))
-                    return OrderResult(success=True)
+                    final = OrderResult(success=True)
+                    await self._notify_execute_success(signal, final)
+                    return final
                 except Exception as e:
                     logging.error(f"Error handling CANCEL action: {e}")
                     return OrderResult(success=False, error_message=str(e))
@@ -2044,13 +2059,16 @@ class ExchangeManager:
                     if not all_closed:
                         msg = "; ".join([r.error_message or "" for r in results_close if not r.success]) or "Close failed during turnover"
                         return OrderResult(success=False, error_message=msg, extra_info={'closed_orders': [r.to_dict() for r in results_close], 'open_order': res_open.to_dict() if res_open else None})
-                    return OrderResult(
+                    final = OrderResult(
                         success=res_open.success,
                         order_id=res_open.order_id,
                         executed_price=res_open.executed_price,
                         executed_amount=res_open.executed_amount,
                         extra_info={'closed_orders': [r.to_dict() for r in results_close], 'open_order': res_open.to_dict() if res_open else None}
                     )
+                    if final.success:
+                        await self._notify_execute_success(signal, final)
+                    return final
                 except Exception as e:
                     logging.error(f"Error handling TURNOVER action: {e}")
                     return OrderResult(success=False, error_message=str(e))
@@ -2060,6 +2078,7 @@ class ExchangeManager:
                 try:
                     logging.info(f"ExecuteSignal UPDATE: fetching open orders for {signal.symbol}")
                     open_orders = await exchange.get_open_orders(signal.symbol)
+                    open_orders = open_orders or []
                     logging.info(f"ExecuteSignal UPDATE: open_orders_count={len(open_orders or [])}")
                     recreated_any = False
                     tp_px = None
@@ -2106,7 +2125,9 @@ class ExchangeManager:
                             logging.info(f"ExecuteSignal UPDATE: skip price change for partially filled/active order id={oi.id}, will only update TP/SL if exists")
                     if recreated_any:
                         logging.info("ExecuteSignal UPDATE: open orders recreated successfully (no TP/SL changes)")
-                        return OrderResult(success=True)
+                        final = OrderResult(success=True)
+                        await self._notify_execute_success(signal, final)
+                        return final
                     logging.info("ExecuteSignal UPDATE: updating existing TP/SL only (no creation)")
                     ok = False
                     if getattr(exchange, 'exchange_name', '') == 'OKX':
@@ -2133,7 +2154,10 @@ class ExchangeManager:
                             logging.warning(f"ExecuteSignal UPDATE: error updating existing TP/SL on OKX: {e}")
                     else:
                         logging.info("ExecuteSignal UPDATE: existing TP/SL update not supported for this exchange")
-                    return OrderResult(success=ok, error_message=None if ok else "No changes applied")
+                    final = OrderResult(success=ok, error_message=None if ok else "No changes applied")
+                    if final.success:
+                        await self._notify_execute_success(signal, final)
+                    return final
                 except Exception as e:
                     logging.error(f"Error executing UPDATE: {e}")
                     return OrderResult(success=False, error_message=str(e))
@@ -2226,7 +2250,13 @@ class ExchangeManager:
                             logging.error(f"Failed to create order for zone: {zone}")
 
                     # Return first result (for compatibility)
-                    return results[0] if results else OrderResult(
+                    if results:
+                        success_result = next((r for r in results if r.success), None)
+                        if success_result:
+                            await self._notify_execute_success(signal, success_result)
+                            return success_result
+                        return results[0]
+                    return OrderResult(
                         success=False,
                         error_message="No orders created"
                     )
@@ -2299,6 +2329,8 @@ class ExchangeManager:
                                     logging.info("Skipped TP/SL attach: no open position yet (inline TP/SL applied if supported)")
                         except Exception as e:
                             logging.error(f"Error attaching TP/SL: {e}")
+                    if result.success:
+                        await self._notify_execute_success(signal, result)
                     return result
 
         except Exception as e:
