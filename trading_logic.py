@@ -30,10 +30,11 @@ class TradingLogic:
         self._open_active: bool = False
         self._last_message_ts: Optional[datetime] = None
         self._last_message_content: Optional[str] = None
-        self.default_prompt = """你是一名专业的交易信号分析器（Trade Signal Parser）。你的任务是解析用户输入文本，判断是否包含新的交易信号或对现有订单的更新。输入包含两部分：
-1. 最新消息文本
-2. 当前订单信息（持仓或委托）。若两者均为空，则视为“空仓状态”。
-示例：
+        self.default_prompt = """你是一名专业的交易信号分析器（Trade Signal Parser）。你的任务是解析用户输入文本，判断是否包含新的交易信号或对现有委托/订单的更新，输出正确的交易指令。输入包含3部分：
+1. 最新消息文本，若有引用消息，【引用消息】后面是对应的引用消息;
+2. 当前订单信息（持仓或委托）以当前持仓:或者当前委托:开头。若两者均为空，则视为“空仓状态”;
+3. 有开仓以来的消息，是有交易信息消息以来的所有消息，便于分析订单的变化。可能没有该类消息。
+当前订单信息示例：
 当前持仓:
 OKX:
 BTC/USDT:USDT sell limit 量:1.0 价:88820.0 状态:open
@@ -79,10 +80,8 @@ BTC/USDT:USDT sell limit 量:1.0 价:88820.0 状态:open
 支持多个目标
 若无 percentage → 自动平均（总和 ≤ 100）
 3. stop_loss
-若消息未提供 → 自动生成 SL
-要求 RR ≥ 1:1.5
-做多：SL < entry_price
-做空：SL > entry_price
+若消息未提供 → 不自动生成，等待后续消息进行增加或者修改止损
+要求 RR ≥ 1:1.5，若有明确止盈止损点位，损益比不满足RR ≥ 1:1.5，修改入场价格，至少修改到RR = 1:1.5
 4. confidence 自动评估
 明确价格 + 专业语气：0.7–0.9
 一般信号：0.4–0.7
@@ -98,18 +97,17 @@ leverage：3
 position_size：4500
 margin_mode：isolated
 exchange: OKX
-8. 换手做多,换手直接入场做多，当前持有空单，直接换手为多单
-9. 换手做空,换手直接入场做空，当前持有多单，直接换手为空
 
 频道模式（关键逻辑）
-此为多人会员频道，不是一对一模式，只关注非一对一模式的消息。
+此为多人会员频道，不是一对一模式，只关注普通消息，不关注一对一模式的消息。
+一对一模式的消息实例如下：一对一指导XXX多单 市价xx附近。。。
 
 任意时刻只能存在一笔活跃订单。
 若当前为空仓 → 可生成 OPEN_LONG 或 OPEN_SHORT
-若已有订单 → 所有价格、TP、SL 修改 → action = UPDATE
+若已有委托/订单 → 所有价格、TP、SL 修改 → action = UPDATE
 若消息代表平仓（如“全部止盈”“恭喜”“市价卖出”）→ action = CLOSE
 
-UPDATE 定义，UPDATE 用于任何以下情况：
+UPDATE 定义，UPDATE 用于从消息中分析得到任何以下情况：
 修改委托价格
 修改止盈/止损
 部分止盈引起剩余仓位变化
@@ -119,6 +117,10 @@ UPDATE 定义，UPDATE 用于任何以下情况：
 CANCEL 定义
 CANCEL是当前有委托订单，撤销当前委托订单
 
+TURNOVER 定义
+换手做多,换手直接入场做多，当前持有空单，直接换手为多单
+换手做空,换手直接入场做空，当前持有多单，直接换手为空
+ 
 空仓规则
 当前无持仓且无委托 → 可开新仓
 若已有持仓或委托 → 不允许新开仓，只能 UPDATE
@@ -135,9 +137,9 @@ CANCEL是当前有委托订单，撤销当前委托订单
 不含任何交易意图的信息
 
 部分输入内容解读：
-1. 剩余仓位全部止盈出局--》发送 CLOSE
-2. 换手直接入场做空/做多 --》发送 TURNOVER
-3. 空单/多单全部出局--》发送 CLOSE
+1. 单独的信息，仅包含“剩余仓位全部止盈/止损出局"--》发送 CLOSE
+2. 换手/反手直接入场做空/做多 --》发送 TURNOVER
+3. 单独的信息，仅包含“ 空单/多单全部出局”--》发送 CLOSE
 4. 中长线止盈d%，做成本保护继续持有--》发送 CLOSE，仓位为d%，发送UPDATE，止损设置为成本价
 5. BTC市价$1附近 小赚$2点止盈$3% 做成本保护过夜-->在$1止盈$3%,发送CLOSE，仓位为$3%并且发送UPDATE，止损设置为成本价
 
@@ -483,7 +485,9 @@ CANCEL是当前有委托订单，撤销当前委托订单
                 if not self._open_active:
                     self._open_active = True
                     self._message_history = []
-                self._message_history.append({'ts': now_ts.isoformat(), 'text': cleaned_message})
+                # 移除消息中的持仓/委托信息后存入历史
+                cleaned_for_history = re.sub(r'当前[持仓委托]:[\s\S]*?(?=\n\n|\Z)', '', cleaned_message).strip()
+                self._message_history.append({'ts': now_ts.strftime('%Y-%m-%d %H:%M:%S'), 'text': cleaned_for_history})
                 try:
                     oo_text = ""
                     if isinstance(open_orders, dict):
