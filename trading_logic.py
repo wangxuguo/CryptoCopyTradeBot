@@ -30,6 +30,8 @@ class TradingLogic:
         self._open_active: bool = False
         self._last_message_ts: Optional[datetime] = None
         self._last_message_content: Optional[str] = None
+        self.deepseekClient = OpenAI(api_key=os.environ.get('DEEPSEEK_API_KEY'), base_url="https://api.deepseek.com")
+
         self.default_prompt = """你是一名专业的交易信号分析器（Trade Signal Parser）。你的任务是解析用户输入文本，判断是否包含新的交易信号或对现有委托/订单的更新，输出正确的交易指令。输入包含3部分：
 1. 最新消息文本，若有引用消息，【引用消息】后面是对应的引用消息;
 2. 当前订单信息（持仓或委托）以当前持仓:或者当前委托:开头。若两者均为空，则视为“空仓状态”;
@@ -525,9 +527,9 @@ TURNOVER 定义
             except Exception as e:
                 logging.warning(f"OpenAI 接口调用失败: {e}，尝试使用 qwen 接口")
                 try:
-                    # 使用 qwen 接口作为备选
-                    response = self.openai_client.chat.completions.create(
-                        model="qwen-turbo",  # 假设 qwen 提供的模型名称
+                    # 使用 deepseek 接口作为备选
+                    response = self.deepseekClient.chat.completions.create(
+                        model="deepseek-chat",  # 假设 deepseek 提供的模型名称
                         messages=[
                             {"role": "system", "content": prompt},
                             {"role": "user", "content": user_content}
@@ -535,9 +537,9 @@ TURNOVER 定义
                         temperature=0.7,
                         max_tokens=1024
                     )
-                except Exception as qwen_e:
-                    logging.error(f"qwen 接口也调用失败: {qwen_e}")
-                    raise qwen_e
+                except Exception as deepseek_e:
+                    logging.error(f"deepseek 接口也调用失败: {deepseek_e}")
+                    raise deepseek_e
             self._last_message_ts = now_ts
             self._last_message_content = cleaned_message
 
