@@ -48,6 +48,7 @@ class TradingBot:
         self.db = Database(config.DATABASE_NAME)
         self.exchange_manager = ExchangeManager(config)
         self.trading_logic = TradingLogic(
+            config.DEEPSEEK_API_KEY,
             config.OPENAI_API_KEY,
             config.OPENAI_API_BASE_URL,
             self.exchange_manager

@@ -107,6 +107,7 @@ class Config:
     OWNER_ID: int = field(default_factory=lambda: int(os.getenv("OWNER_ID", "123")))
 
     # OpenAI配置
+    DEEPSEEK_API_KEY: str = field(default_factory=lambda: os.getenv("DEEPSEEK_API_KEY", "123")) # 添加DEEPSEEK_API_KEY默认值
     OPENAI_API_KEY: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", "123")) # 添加OPENAI_API_KEY默认值
     OPENAI_API_BASE_URL: str = field(default_factory=lambda: os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1")) # 添加OPENAI_API_BASE_URL默认值
 

@@ -19,7 +19,7 @@ except Exception:
     ExchangeManager = None
 
 class TradingLogic:
-    def __init__(self, openai_key: str, openai_base_url: str, exchange_manager: Optional[object] = None):
+    def __init__(self, deepseek_api_key: str, openai_key: str, openai_base_url: str, exchange_manager: Optional[object] = None):
         # 初始化 OpenAI 客户端，优先在构造函数中设置 base_url
         if openai_base_url:
             self.openai_client = OpenAI(api_key=openai_key, base_url=openai_base_url)
@@ -30,7 +30,7 @@ class TradingLogic:
         self._open_active: bool = False
         self._last_message_ts: Optional[datetime] = None
         self._last_message_content: Optional[str] = None
-        self.deepseekClient = OpenAI(api_key=os.environ.get('DEEPSEEK_API_KEY'), base_url="https://api.deepseek.com")
+        self.deepseekClient = OpenAI(deepseek_api_key, base_url="https://api.deepseek.com")
 
         self.default_prompt = """你是一名专业的交易信号分析器（Trade Signal Parser）。你的任务是解析用户输入文本，判断是否包含新的交易信号或对现有委托/订单的更新，输出正确的交易指令。输入包含3部分：
 1. 最新消息文本，若有引用消息，【引用消息】后面是对应的引用消息;
