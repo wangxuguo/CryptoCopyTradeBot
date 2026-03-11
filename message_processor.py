@@ -270,9 +270,35 @@ class MessageProcessor:
             return None
     async def resend_message_text_to_user(self, bot, target_user_id: int, text: str):
         await bot.send_message(chat_id=target_user_id, text=text)
-    async def resend_message_to_user(self, update, context, target_user_id: int, prefer_copy: bool = True):
+    async def resend_message_to_user(self, update=None, context=None, target_user_id: int = 0, prefer_copy: bool = True, bot=None, message=None):
         try:
-            if getattr(update, 'message', None) and update.message.message_id:
+            if bot and message and getattr(message, 'id', None):
+                from_chat_id = None
+                if getattr(message, 'chat', None):
+                    from_chat_id = getattr(message.chat, 'id', None)
+                if not from_chat_id:
+                    from_chat_id = getattr(message, 'chat_id', None)
+                if from_chat_id:
+                    try:
+                        await bot.forward_message(
+                            chat_id=target_user_id,
+                            from_chat_id=from_chat_id,
+                            message_id=message.id,
+                        )
+                        return
+                    except Exception as e:
+                        logging.warning(f"Forward message failed: {e}")
+                    if prefer_copy:
+                        try:
+                            await bot.copy_message(
+                                chat_id=target_user_id,
+                                from_chat_id=from_chat_id,
+                                message_id=message.id,
+                            )
+                            return
+                        except Exception as e:
+                            logging.warning(f"Copy message failed: {e}")
+            if getattr(update, 'message', None) and update.message.message_id and context:
                 try:
                     await context.bot.forward_message(
                         chat_id=target_user_id,
@@ -292,12 +318,24 @@ class MessageProcessor:
                         return
                     except Exception as e:
                         logging.warning(f"Copy message failed: {e}")
-            text = getattr(update.message, 'text', None) or getattr(update.message, 'caption', None) or ''
+            text = (
+                getattr(message, 'text', None)
+                or getattr(message, 'caption', None)
+                or getattr(update.message, 'text', None)
+                or getattr(update.message, 'caption', None)
+                or ''
+            )
             if text:
-                await context.bot.send_message(
-                    chat_id=target_user_id,
-                    text=text,
-                )
+                if bot:
+                    await bot.send_message(
+                        chat_id=target_user_id,
+                        text=text,
+                    )
+                elif context:
+                    await context.bot.send_message(
+                        chat_id=target_user_id,
+                        text=text,
+                    )
             else:
                 logging.error("No text or caption to resend")
         except Exception as e:
