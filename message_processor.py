@@ -414,9 +414,23 @@ class MessageProcessor:
                         for ex_name, positions in positions_by_ex.items():
                             lines.append(f"{ex_name}:")
                             for pos in positions:
-                                side = '做多' if getattr(pos, 'size', 0) > 0 or getattr(pos, 'side', '').upper() == 'OPEN_LONG' else '做空'
+                                raw_side = pos.get('side') if hasattr(pos, 'get') else getattr(pos, 'side', None)
+                                if hasattr(raw_side, 'value'):
+                                    raw_side = raw_side.value
+                                side = '做多'
+                                if isinstance(raw_side, str):
+                                    normalized = raw_side.strip().upper()
+                                    if normalized in ('SHORT', 'OPEN_SHORT', 'SELL'):
+                                        side = '做空'
+                                    elif normalized in ('LONG', 'OPEN_LONG', 'BUY'):
+                                        side = '做多'
+                                else:
+                                    size_value = pos.get('size') if hasattr(pos, 'get') else getattr(pos, 'size', 0)
+                                    if isinstance(size_value, (int, float)) and size_value < 0:
+                                        side = '做空'
+                                size_value = pos.get('size') if hasattr(pos, 'get') else getattr(pos, 'size', 0)
                                 lines.append(
-                                    f"{getattr(pos, 'symbol', '')} {side} 量: {abs(getattr(pos, 'size', 0))} 入场: {getattr(pos, 'entry_price', 0):.6f} 未盈亏: {getattr(pos, 'unrealized_pnl', 0):.2f}"
+                                    f"{getattr(pos, 'symbol', '')} {side} 量: {abs(size_value)} 入场: {getattr(pos, 'entry_price', 0):.6f} 未盈亏: {getattr(pos, 'unrealized_pnl', 0):.2f}"
                                 )
                         if lines:
                             context_append += "\n\n当前持仓:\n" + "\n".join(lines)
