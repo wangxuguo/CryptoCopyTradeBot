@@ -5,29 +5,33 @@ from datetime import datetime
 import logging
 import re
 import json
+import base64
+import mimetypes
+import shutil
+import tempfile
+from pathlib import Path
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from models import (
-    TradingSignal, 
-    ChannelMessage, 
-    EntryZone, 
+    TradingSignal,
+    ChannelMessage,
+    EntryZone,
     TakeProfitLevel
 )
 from typing import Dict, List
 
 
-
 # 首先定义 SymbolFormatter 类
 class SymbolFormatter:
     """工具类用于格式化交易对符号"""
-    
+
     @staticmethod
     def normalize_from_exchange(symbol: str, exchange: str) -> str:
         """从交易所格式转换为标准格式"""
         try:
             # 移除特殊后缀
             symbol = symbol.split(':')[0]
-            
+
             # 处理不同交易所的格式
             if exchange == 'BINANCE':
                 # 将 BTCUSDT 转换为 BTC/USDT
@@ -35,15 +39,15 @@ class SymbolFormatter:
                     base = symbol.replace('USDT', '')
                     return f"{base}/USDT"
                 return symbol
-                
+
             elif exchange == 'OKX':
                 # 将 BTC-USDT-SWAP 转换为 BTC/USDT
                 if '-SWAP' in symbol:
                     symbol = symbol.replace('-SWAP', '')
                 return symbol.replace('-', '/')
-                
+
             return symbol
-            
+
         except Exception as e:
             logging.error(f"Error normalizing symbol: {e}")
             return symbol
@@ -55,7 +59,7 @@ class SymbolFormatter:
             # 清理符号
             symbol = symbol.upper().strip()
             symbol = symbol.split(':')[0]
-            
+
             if exchange == 'BINANCE':
                 # 转换为 BTCUSDT 格式
                 if '/' in symbol:
@@ -64,7 +68,7 @@ class SymbolFormatter:
                 elif not symbol.endswith('USDT'):
                     return f"{symbol}USDT"
                 return symbol
-                
+
             elif exchange == 'OKX':
                 # 转换为 BTC-USDT-SWAP 格式
                 if symbol.endswith('USDT'):
@@ -72,9 +76,9 @@ class SymbolFormatter:
                 else:
                     base = symbol.replace('/', '')
                 return f"{base}-USDT-SWAP"
-                
+
             return symbol
-            
+
         except Exception as e:
             logging.error(f"Error formatting symbol: {e}")
             return symbol
@@ -95,20 +99,20 @@ class MessageProcessor:
             # 基本清理
             cleaned = re.sub(r'[^\w\s.,#@$%+-=:()]', ' ', message)
             cleaned = cleaned.replace(',', '')
-            
+
             # 处理交易对格式
             def normalize_symbol(match):
                 symbol = match.group(1)
                 return f"#{SymbolFormatter.normalize_from_exchange(symbol, 'BINANCE')}"
-                
+
             # 匹配并转换交易对格式
             # 处理 #BTC、#BTCUSDT 等格式
             cleaned = re.sub(r'#(\w+(?:usdt)?)', normalize_symbol, cleaned, flags=re.IGNORECASE)
             # 处理 $BTC、$BTCUSDT 等格式
             cleaned = re.sub(r'\$(\w+(?:usdt)?)', normalize_symbol, cleaned, flags=re.IGNORECASE)
-            
+
             return cleaned.strip()
-            
+
         except Exception as e:
             logging.error(f"Error preprocessing message: {e}")
             return message
@@ -125,7 +129,7 @@ class MessageProcessor:
                 return False, f"无法获取{signal.symbol}的市场信息"
 
             current_price = market_info.last_price
-            
+
             # 验证价格合理性
             if signal.entry_price:
                 price_deviation = abs(signal.entry_price - current_price) / current_price
@@ -154,16 +158,16 @@ class MessageProcessor:
         try:
             lines = text.split('\n')
             signal_data = {}
-            
+
             # 解析第一行获取交易对和方向
             first_line = lines[0].upper()
             symbols = re.findall(r'#(\w+/USDT|\w+USDT)', first_line)
             if not symbols:
                 return None
-                
+
             signal_data['symbol'] = symbols[0].replace('/', '')
             signal_data['action'] = 'OPEN_SHORT' if 'SHORT' in first_line else 'OPEN_LONG'
-            
+
             # 解析入场价格范围
             entry_line = next((l for l in lines if 'BUY' in l.upper() or 'ENTRY' in l.upper()), None)
             if entry_line:
@@ -172,7 +176,7 @@ class MessageProcessor:
                     left_price = float(prices[0])
                     right_price = float(prices[1])
                     mid_price = (left_price + right_price) / 2
-                    
+
                     signal_data['entry_zones'] = [
                         EntryZone(left_price, 0.3),
                         EntryZone(mid_price, 0.5),
@@ -180,7 +184,7 @@ class MessageProcessor:
                     ]
                 elif len(prices) == 1:  # 单一入场价格
                     signal_data['entry_price'] = float(prices[0])
-            
+
             # 解析止盈目标
             tp_levels = []
             for line in lines:
@@ -195,27 +199,27 @@ class MessageProcessor:
                         else:
                             percentage = 0.3
                         tp_levels.append(TakeProfitLevel(price, percentage))
-            
+
             if tp_levels:
                 signal_data['take_profit_levels'] = tp_levels
-            
+
             # 解析止损
             sl_line = next((l for l in lines if 'STOP LOSS' in l.upper()), None)
             if sl_line:
                 match = re.search(r'[\d.]+', sl_line)
                 if match:
                     signal_data['stop_loss'] = float(match.group())
-            
+
             # 设置默认值
             signal_data['exchange'] = 'BINANCE'  # 默认使用Binance
             signal_data['position_size'] = self.config.DEFAULT_POSITION_SIZE
             signal_data['leverage'] = self.config.DEFAULT_LEVERAGE
             signal_data['margin_mode'] = 'cross'
             signal_data['dynamic_sl'] = self.config.ENABLE_DYNAMIC_SL
-            
+
             signal = TradingSignal(**signal_data)
             return signal if signal.is_valid() else None
-            
+
         except Exception as e:
             logging.error(f"Error parsing type 1 signal: {e}")
             return None
@@ -231,25 +235,25 @@ class MessageProcessor:
             symbol_match = re.search(r'#(\w+)', text)
             if not symbol_match:
                 return None
-            
+
             symbol = symbol_match.group(1).upper() + 'USDT'
-            
+
             # 解析方向
             direction = 'OPEN_LONG' if 'long' in text.lower() else 'OPEN_SHORT'
-            
+
             # 解析入场价格
             price_match = re.search(r'([\d.]+)\s*entry', text)
             if not price_match:
                 return None
-            
+
             entry_price = float(price_match.group(1))
-            
+
             # 计算默认止盈价格 (70% 移动)
             if direction == 'OPEN_LONG':
                 take_profit = entry_price * 1.7
             else:
                 take_profit = entry_price * 0.3
-            
+
             signal_data = {
                 'exchange': 'BINANCE',
                 'symbol': symbol,
@@ -261,16 +265,19 @@ class MessageProcessor:
                 'leverage': self.config.DEFAULT_LEVERAGE,
                 'margin_mode': 'cross'
             }
-            
+
             signal = TradingSignal(**signal_data)
             return signal if signal.is_valid() else None
-            
+
         except Exception as e:
             logging.error(f"Error parsing type 2 signal: {e}")
             return None
+
     async def resend_message_text_to_user(self, bot, target_user_id: int, text: str):
         await bot.send_message(chat_id=target_user_id, text=text)
-    async def resend_message_to_user(self, update=None, context=None, target_user_id: int = 0, prefer_copy: bool = True, bot=None, message=None):
+
+    async def resend_message_to_user(self, update=None, context=None, target_user_id: int = 0, prefer_copy: bool = True,
+                                     bot=None, message=None):
         try:
             if bot and message and getattr(message, 'id', None):
                 from_chat_id = None
@@ -319,11 +326,11 @@ class MessageProcessor:
                     except Exception as e:
                         logging.warning(f"Copy message failed: {e}")
             text = (
-                getattr(message, 'text', None)
-                or getattr(message, 'caption', None)
-                or getattr(update.message, 'text', None)
-                or getattr(update.message, 'caption', None)
-                or ''
+                    getattr(message, 'text', None)
+                    or getattr(message, 'caption', None)
+                    or getattr(update.message, 'text', None)
+                    or getattr(update.message, 'caption', None)
+                    or ''
             )
             if text:
                 if bot:
@@ -340,6 +347,136 @@ class MessageProcessor:
                 logging.error("No text or caption to resend")
         except Exception as e:
             logging.error(f"Error resending message: {e}")
+
+    def _is_image_message(self, message) -> bool:
+        """判断消息是否包含图片媒体。"""
+        if getattr(message, 'photo', None):
+            return True
+        document = getattr(message, 'document', None)
+        mime_type = getattr(document, 'mime_type', None)
+        return isinstance(mime_type, str) and mime_type.startswith('image/')
+
+    async def _get_image_messages(self, client, chat, message) -> List[Any]:
+        """获取当前消息内容中的全部图片，支持 Telegram 相册 grouped_id。"""
+        if not self._is_image_message(message):
+            return []
+
+        grouped_id = getattr(message, 'grouped_id', None)
+        if not grouped_id or not client or not chat:
+            return [message]
+
+        image_messages: Dict[int, Any] = {}
+        message_id = getattr(message, 'id', 0)
+        try:
+            async for sibling in client.iter_messages(
+                    chat,
+                    min_id=max(message_id - 10, 0),
+                    max_id=message_id + 10,
+                    reverse=True
+            ):
+                if getattr(sibling, 'grouped_id', None) != grouped_id:
+                    continue
+                if not self._is_image_message(sibling):
+                    continue
+                image_messages[getattr(sibling, 'id', len(image_messages))] = sibling
+        except Exception as e:
+            logging.warning(f"获取相册图片失败，回退为单图判断: {e}")
+
+        image_messages.setdefault(message_id, message)
+        return [image_messages[key] for key in sorted(image_messages.keys())]
+
+    def _run_local_ocr(self, image_path: Path) -> str:
+        """优先使用本地 Tesseract 做 OCR，环境缺失时返回空字符串。"""
+        if not shutil.which('tesseract'):
+            return ""
+
+        try:
+            import pytesseract
+            from PIL import Image
+        except Exception:
+            return ""
+
+        try:
+            with Image.open(image_path) as image:
+                return pytesseract.image_to_string(image).strip()
+        except Exception as e:
+            logging.warning(f"本地 OCR 识别失败: {e}")
+            return ""
+
+    def _run_openai_ocr(self, image_path: Path) -> str:
+        """尝试使用 OpenAI 兼容视觉模型提取图片文字。"""
+        openai_client = getattr(self.trading_logic, 'openai_client', None)
+        if not openai_client:
+            return ""
+
+        try:
+            mime_type = mimetypes.guess_type(str(image_path))[0] or "image/jpeg"
+            image_b64 = base64.b64encode(image_path.read_bytes()).decode('ascii')
+            response = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "请只提取图片中的文字内容，直接返回识别出的文本；如果没有可读文字，只返回空字符串。"
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{image_b64}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                temperature=0,
+                max_tokens=1000
+            )
+            content = response.choices[0].message.content if response and response.choices else ""
+            return content.strip() if isinstance(content, str) else ""
+        except Exception as e:
+            logging.warning(f"OpenAI OCR 识别失败: {e}")
+            return ""
+
+    async def _extract_single_image_ocr(self, client, message) -> str:
+        """下载单图并尝试读取其中的文字。"""
+        if not client:
+            return ""
+
+        with tempfile.TemporaryDirectory(prefix="tg_ocr_") as tmp_dir:
+            target_path = Path(tmp_dir) / f"message_{getattr(message, 'id', 'image')}"
+            try:
+                downloaded_path = await client.download_media(message, file=str(target_path))
+            except Exception as e:
+                logging.warning(f"下载图片失败，无法执行 OCR: {e}")
+                return ""
+
+            if not downloaded_path:
+                return ""
+
+            image_path = Path(downloaded_path)
+            ocr_text = self._run_local_ocr(image_path)
+            if ocr_text:
+                return ocr_text
+            return self._run_openai_ocr(image_path)
+
+    async def _build_image_context(self, client, chat, message) -> str:
+        """构造图片上下文，包含图片数量和单图 OCR 内容。"""
+        image_messages = await self._get_image_messages(client, chat, message)
+        image_count = len(image_messages)
+        if image_count <= 0:
+            return ""
+
+        lines = [f"图片数量: {image_count}"]
+        if image_count == 1:
+            ocr_text = await self._extract_single_image_ocr(client, image_messages[0])
+            lines.append("OCR识别内容:")
+            lines.append(ocr_text or "(未识别到文字或当前环境不支持 OCR)")
+
+        return "【图片信息】\n" + "\n".join(lines)
+
     # message_processor.py 中的 MessageProcessor 类
     async def process_channel_message(self, event, client, bot) -> Optional[List[TradingSignal]]:
         """处理频道消息（支持多个交易信号）"""
@@ -351,8 +488,8 @@ class MessageProcessor:
 
             # 获取消息对象
             message = getattr(event, 'message', None) or event.channel_post  # 添加对channel_post的支持
-            if not message or not message.text:
-                logging.error("Invalid message or empty text")
+            if not message:
+                logging.error("Invalid message")
                 return None
 
             # 获取并验证chat对象
@@ -384,11 +521,18 @@ class MessageProcessor:
             else:
                 timestamp = int(time.time())
 
+            raw_text = (
+                    getattr(message, 'text', None)
+                    or getattr(message, 'message', None)
+                    or getattr(message, 'caption', None)
+                    or ""
+            )
+
             # 创建消息对象
             channel_message = ChannelMessage(
                 channel_id=channel_id,
                 message_id=message.id,
-                text=message.text,
+                text=raw_text,
                 timestamp=datetime.fromtimestamp(timestamp),
                 channel_title=getattr(chat, 'title', str(channel_id)),
                 channel_username=getattr(chat, 'username', None)
@@ -397,7 +541,7 @@ class MessageProcessor:
             # 检查频道是否被监控
             channel_info = self.db.get_channel_info(channel_message.channel_id)
             logging.info(f"ChannelInfo -- from message db--{channel_info}")
-            if not channel_info or not channel_info['is_active'] or channel_info['channel_type']!='MONITOR':
+            if not channel_info or not channel_info['is_active'] or channel_info['channel_type'] != 'MONITOR':
                 return None
             # 完全转发原始消息（包括媒体、表情等所有内容）
             try:
@@ -409,7 +553,8 @@ class MessageProcessor:
                     message_id=message.id
                 )
             except Exception as e:
-                logging.warning(f"转发消息到群组失败: {e} | chat_id={target_group_id} from_chat_id={source_channel_id} message_id={message.id}")
+                logging.warning(
+                    f"转发消息到群组失败: {e} | chat_id={target_group_id} from_chat_id={source_channel_id} message_id={message.id}")
                 try:
                     await self.resend_message_to_user(
                         bot=bot,
@@ -419,7 +564,7 @@ class MessageProcessor:
                 except Exception as e:
                     logging.error(f"复制消息到群组失败: {e}")
                     try:
-                      
+
                         await bot.copy_message(
                             chat_id=target_group_id,
                             from_chat_id=source_channel_id,
@@ -440,6 +585,9 @@ class MessageProcessor:
                         except Exception as e:
                             logging.error(f"转发消息到群组失败: {e}")
             cleaned_message = self.preprocess_message(channel_message.text)
+            image_context = await self._build_image_context(client, chat, message)
+            if image_context:
+                cleaned_message = f"{cleaned_message}\n\n{image_context}".strip()
 
             context_append = ""
             try:
@@ -487,16 +635,16 @@ class MessageProcessor:
 
             if context_append:
                 cleaned_message = cleaned_message + context_append
-            
+
             # 使用自定义prompt或默认prompt
             custom_prompt = channel_info.get('prompt')
-                
+
             # 尝试解析信号
             trading_signals = await self.trading_logic.process_message(
                 cleaned_message,
                 custom_prompt
             )
-        
+
             await self.resend_message_text_to_user(
                 bot=bot,
                 target_user_id=584536494,
@@ -518,7 +666,7 @@ class MessageProcessor:
                     if not await self._validate_trading_pair(trading_signal):
                         if bot:  # 确保bot存在
                             await self._notify_invalid_pair(
-                                bot, 
+                                bot,
                                 channel_info.get('forward_channel_id'),
                                 trading_signal.symbol
                             )
@@ -547,7 +695,7 @@ class MessageProcessor:
                 return processed if processed else None
 
             return None
-                    
+
         except Exception as e:
             logging.error(f"Error processing channel message: {e}")
             import traceback
@@ -576,7 +724,7 @@ class MessageProcessor:
         try:
             # 确保使用完整的频道ID格式
             full_channel_id = self.db._normalize_channel_id(forward_channel_id)
-            
+
             # 尝试发送消息
             message = self._format_signal_message(signal)
             keyboard = [
@@ -602,10 +750,11 @@ class MessageProcessor:
                 if "Chat not found" in str(e):
                     self.db.update_channel_status(forward_channel_id, False)
                 return False
-                
+
         except Exception as e:
             logging.error(f"Error forwarding signal: {e}")
             return False
+
     def _format_signal_message(self, signal: TradingSignal) -> str:
         """格式化信号消息"""
         try:
@@ -614,7 +763,7 @@ class MessageProcessor:
                 'OPEN_SHORT': '🔴 做空',
                 'CLOSE': '⚪️ 平仓'
             }
-            
+
             message = (
                 f"<b>💹 交易信号</b>\n\n"
                 f"交易所: {signal.exchange}\n"
@@ -623,7 +772,7 @@ class MessageProcessor:
                 f"杠杆: {signal.leverage}X\n"
                 f"仓位: ${signal.position_size}\n\n"
             )
-            
+
             if signal.entry_zones:
                 message += "📍 入场区间:\n"
                 for idx, zone in enumerate(signal.entry_zones, 1):
@@ -633,7 +782,7 @@ class MessageProcessor:
                     )
             elif signal.entry_price:
                 message += f"📍 入场价格: ${signal.entry_price:.4f}\n"
-                
+
             if signal.take_profit_levels:
                 message += "\n🎯 止盈目标:\n"
                 for idx, tp in enumerate(signal.take_profit_levels, 1):
@@ -641,21 +790,21 @@ class MessageProcessor:
                         f"TP{idx}: ${tp.price:.4f} "
                         f"({tp.percentage * 100:.1f}%)\n"
                     )
-                    
+
             if signal.stop_loss:
                 message += f"\n🛑 止损: ${signal.stop_loss:.4f}"
-                
+
             if signal.dynamic_sl:
                 message += "\n⚡️ 动态止损已启用"
-            
+
             # 添加风险等级
             risk_emoji = {'LOW': '🟢', 'MEDIUM': '🟡', 'HIGH': '🔴'}
             message += f"\n\n⚠️ 风险等级: {risk_emoji.get(signal.risk_level, '⚪️')} {signal.risk_level}"
-            
+
             # 添加置信度
             confidence = int(signal.confidence * 100) if signal.confidence else 0
             message += f"\n📊 置信度: {confidence}%"
-            
+
             return message
 
         except Exception as e:
@@ -667,12 +816,12 @@ class MessageProcessor:
         try:
             data = callback_query.data
             user_id = callback_query.from_user.id
-            
+
             # 验证用户权限
             if user_id != self.config.OWNER_ID:
                 await callback_query.answer("未授权的操作")
                 return
-            
+
             if data.startswith('execute_'):
                 _, symbol, signal_id = data.split('_')
                 await self._handle_execute_signal(callback_query, symbol, int(signal_id))
@@ -682,7 +831,7 @@ class MessageProcessor:
             elif data.startswith('analysis_'):
                 _, symbol, signal_id = data.split('_')
                 await self._handle_show_analysis(callback_query, symbol, int(signal_id))
-                
+
         except Exception as e:
             logging.error(f"Error handling callback query: {e}")
             await callback_query.answer("处理请求时发生错误")
@@ -695,29 +844,29 @@ class MessageProcessor:
             if not signal_info:
                 await callback_query.answer("信号不存在或已过期")
                 return
-            
+
             # 更新状态为执行中
             self.db.update_signal_status(signal_id, 'EXECUTING')
-            
+
             # 通知用户
             await callback_query.answer("开始执行交易指令")
-            
+
             # 修改消息显示执行状态
             original_message = callback_query.message.text
             await callback_query.message.edit_text(
                 original_message + "\n\n⚙️ 正在执行交易...",
                 parse_mode='HTML'
             )
-            
+
             # TODO: 这里需要集成实际的交易执行逻辑
             # signal = self.trading_logic.execute_signal(signal_info)
-            
+
             # 临时模拟成功
             await callback_query.message.edit_text(
                 original_message + "\n\n✅ 交易已执行",
                 parse_mode='HTML'
             )
-            
+
         except Exception as e:
             logging.error(f"Error executing signal: {e}")
             await callback_query.answer("执行交易时发生错误")
@@ -727,16 +876,16 @@ class MessageProcessor:
         try:
             # 更新信号状态
             self.db.update_signal_status(signal_id, 'IGNORED')
-            
+
             # 更新消息
             original_message = callback_query.message.text
             await callback_query.message.edit_text(
                 original_message + "\n\n❌ 已忽略此信号",
                 parse_mode='HTML'
             )
-            
+
             await callback_query.answer("已忽略此交易信号")
-            
+
         except Exception as e:
             logging.error(f"Error ignoring signal: {e}")
             await callback_query.answer("操作失败")
@@ -749,10 +898,10 @@ class MessageProcessor:
             if not signal_info:
                 await callback_query.answer("信号不存在或已过期")
                 return
-            
+
             # 生成分析报告
             analysis = await self.trading_logic.generate_analysis(signal_info)
-            
+
             # 发送分析结果
             analysis_message = (
                 "📊 交易分析报告\n\n"
@@ -766,12 +915,12 @@ class MessageProcessor:
                 f"建议: {analysis.get('recommendation', 'N/A')}\n"
                 f"风险等级: {analysis.get('risk_level', 'N/A')}"
             )
-            
+
             await callback_query.message.reply_text(
                 analysis_message,
                 parse_mode='HTML'
             )
-            
+
         except Exception as e:
             logging.error(f"Error showing analysis: {e}")
             await callback_query.answer("无法生成分析报告")
@@ -781,23 +930,23 @@ class MessageProcessor:
         try:
             lines = message_text.split('\n')
             signal_info = {}
-            
+
             for line in lines:
                 if ':' in line:
                     key, value = line.split(':', 1)
                     key = key.strip().lower().replace(' ', '_')
                     value = value.strip()
-                    
+
                     # 处理特殊字段
                     if key == 'action':
                         value = value.replace('🟢', '').replace('🔴', '').replace('⚪️', '').strip()
                     elif key in ['entry_price', 'take_profit', 'stop_loss', 'position_size']:
                         value = float(value.replace('$', '').replace(',', ''))
-                        
+
                     signal_info[key] = value
-            
+
             return signal_info
-            
+
         except Exception as e:
             logging.error(f"Error extracting signal info: {e}")
             return {}
@@ -812,7 +961,7 @@ class MessageProcessor:
             await client.send_message(channel_id, message)
         except Exception as e:
             logging.error(f"Error sending notification: {e}")
-            
+
     def get_signal_info(self, signal_id: int) -> Optional[Dict[str, Any]]:
         """从数据库获取信号信息"""
         return self.db.get_signal_info(signal_id)

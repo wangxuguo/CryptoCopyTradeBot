@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import json
+from pathlib import Path
 from datetime import datetime, timedelta
 import time
 from openai import OpenAI
@@ -13,13 +14,16 @@ import pandas as pd
 
 from models import TradingSignal, EntryZone, TakeProfitLevel
 from typing import Optional
+
 try:
     from exchange_execution import ExchangeManager
 except Exception:
     ExchangeManager = None
 
+
 class TradingLogic:
-    def __init__(self, deepseek_api_key: str, openai_key: str, openai_base_url: str, exchange_manager: Optional[object] = None):
+    def __init__(self, deepseek_api_key: str, openai_key: str, openai_base_url: str,
+                 exchange_manager: Optional[object] = None):
         # 初始化 OpenAI 客户端，优先在构造函数中设置 base_url
         if openai_base_url:
             self.openai_client = OpenAI(api_key=openai_key, base_url=openai_base_url)
@@ -31,6 +35,7 @@ class TradingLogic:
         self._last_message_ts: Optional[datetime] = None
         self._last_message_content: Optional[str] = None
         self.deepseekClient = OpenAI(api_key=deepseek_api_key, base_url="https://api.deepseek.com")
+        self._llm_debug_log_file = Path(__file__).resolve().with_name("llm_api_debug.jsonl")
 
         self.default_prompt = """你是一名专业的交易信号分析器（Trade Signal Parser）。你的任务是解析用户输入文本，判断是否包含新的交易信号或对现有委托/订单的更新，输出正确的交易指令。输入包含3部分：
 1. 最新消息文本，若有引用消息，【引用消息】后面是对应的引用消息;
@@ -96,7 +101,7 @@ HIGH：高杠杆、宽 SL、模糊内容
 消息文本中没有明确说明都是MARKET类型，有限价字样的是LIMIT类型
 7. 默认值
 leverage：3
-position_size：4500
+position_size：5000
 margin_mode：isolated
 exchange: OKX
 
@@ -122,7 +127,7 @@ CANCEL是当前有委托订单，撤销当前委托订单
 TURNOVER 定义
 换手做多,换手直接入场做多，当前持有空单，直接换手为多单
 换手做空,换手直接入场做空，当前持有多单，直接换手为空
- 
+
 空仓规则
 当前无持仓且无委托 → 可开新仓
 若已有持仓或委托 → 不允许新开仓，只能 UPDATE
@@ -144,6 +149,7 @@ TURNOVER 定义
 3. 单独的信息，仅包含“ 空单/多单全部出局”--》发送 CLOSE
 4. 中长线止盈d%，做成本保护继续持有--》发送 CLOSE，仓位为d%，发送UPDATE，止损设置为成本价
 5. BTC市价$1附近 小赚$2点止盈$3% 做成本保护过夜-->在$1止盈$3%,发送CLOSE，仓位为$3%并且发送UPDATE，止损设置为成本价
+6. 短线全部止盈出局 做中长线收益止损下移d%，长线是金，尽可能做长线，只有全部止盈时才止盈，否则做成本保护和利润保护，就是止损设置在入场位置
 
 最终要求
 
@@ -204,7 +210,7 @@ TURNOVER 定义
                 'leverage': 10,
                 'confidence': 0.8
             }
-            
+
             for field, default in numeric_fields.items():
                 if field in data:
                     try:
@@ -214,10 +220,48 @@ TURNOVER 定义
                         return False
 
             return True
-
         except Exception as e:
             logging.error(f"Error validating JSON data: {e}")
             return False
+
+    def _serialize_llm_response(self, response: Any) -> Any:
+        try:
+            if hasattr(response, "model_dump"):
+                return response.model_dump()
+        except Exception:
+            pass
+
+        if isinstance(response, (dict, list, str, int, float, bool)) or response is None:
+            return response
+
+        try:
+            return json.loads(json.dumps(response, default=str, ensure_ascii=False))
+        except Exception:
+            try:
+                return str(response)
+            except Exception:
+                return "<unserializable_response>"
+
+    def _write_llm_debug_entry(
+            self,
+            provider: str,
+            request_payload: Dict[str, Any],
+            response: Any = None,
+            error: Optional[Exception] = None
+    ) -> None:
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "provider": provider,
+            "request": request_payload,
+            "response": self._serialize_llm_response(response),
+            "error": str(error) if error else None
+        }
+        try:
+            with self._llm_debug_log_file.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False, default=str))
+                f.write("\n")
+        except Exception as log_error:
+            logging.warning(f"写入 LLM 调试日志失败: {log_error}")
 
     def _normalize_numbers(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """规范化数值字段"""
@@ -254,12 +298,12 @@ TURNOVER 定义
         except Exception as e:
             logging.error(f"Error normalizing numbers: {e}")
             return data
-        
+
     def _convert_to_trading_signal(self, data: Dict[str, Any]) -> Optional[TradingSignal]:
         """将字典转换为TradingSignal对象"""
         try:
             logging.info("Converting dictionary to TradingSignal")
-            logging.info(f"Input data:\n{'-'*40}\n{json.dumps(data, indent=2)}\n{'-'*40}")
+            logging.info(f"Input data:\n{'-' * 40}\n{json.dumps(data, indent=2)}\n{'-' * 40}")
 
             # 验证必要字段
             required_fields = ['exchange', 'symbol', 'action']
@@ -271,7 +315,7 @@ TURNOVER 定义
             # 处理入场价格/区间
             entry_price = None
             entry_zones = []
-            
+
             # 检查是否有区间入场
             if 'entry_zones' in data and isinstance(data['entry_zones'], list) and data['entry_zones']:
                 for zone_data in data['entry_zones']:
@@ -324,7 +368,7 @@ TURNOVER 定义
                     except (KeyError, ValueError) as e:
                         logging.error(f"Error creating take profit level: {e}")
                         continue
-            
+
             if take_profit_levels:
                 logging.info(f"Created {len(take_profit_levels)} take profit levels")
                 action = data.get('action')
@@ -370,29 +414,29 @@ TURNOVER 定义
                     source_message="",
                     additional_info={}
                 )
-                
+
                 logging.info("Successfully created TradingSignal object")
-                logging.info(f"Signal details:\n{'-'*40}")
+                logging.info(f"Signal details:\n{'-' * 40}")
                 logging.info(f"Exchange: {signal.exchange}")
                 logging.info(f"Symbol: {signal.symbol}")
                 logging.info(f"Action: {signal.action}")
-                
+
                 if entry_zones:
                     logging.info("Entry Zones:")
                     for i, zone in enumerate(entry_zones, 1):
                         logging.info(f"  Zone {i}: Price={zone.price}, Percentage={zone.percentage:.2%}")
                 elif entry_price:
                     logging.info(f"Entry Price: {entry_price}")
-                
+
                 if take_profit_levels:
                     logging.info("Take Profit Levels:")
                     for i, tp in enumerate(take_profit_levels, 1):
                         logging.info(f"  TP {i}: Price={tp.price}, Percentage={tp.percentage:.2%}")
-                
+
                 logging.info(f"Stop Loss: {signal.stop_loss}")
                 logging.info(f"Leverage: {signal.leverage}x")
                 logging.info(f"Position Size: {signal.position_size} USDT")
-                logging.info(f"{'-'*40}")
+                logging.info(f"{'-' * 40}")
 
                 # 验证信号有效性
                 is_valid = signal.is_valid()
@@ -425,33 +469,34 @@ TURNOVER 定义
         """预处理消息文本"""
         try:
             logging.info("Preprocessing message")
-            
+
             # 移除表情符号和特殊字符
             cleaned = re.sub(r'[^\w\s.,#@$%+-:()]', ' ', message)
-            
+
             # 标准化价格格式
             cleaned = cleaned.replace(',', '')
-            cleaned = re.sub(r'(\d+\.?\d*)k', lambda m: str(float(m.group(1))*1000), cleaned)
-            
+            cleaned = re.sub(r'(\d+\.?\d*)k', lambda m: str(float(m.group(1)) * 1000), cleaned)
+
             # 统一符号
             cleaned = cleaned.replace('$', '')
             cleaned = cleaned.upper()
-            cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-            
-            logging.info(f"Preprocessed message:\n{'-'*40}\n{cleaned}\n{'-'*40}")
+            cleaned = cleaned.replace('\r\n', '\n').replace('\r', '\n')
+            cleaned = re.sub(r'[^\S\n]+', ' ', cleaned)
+            cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+
+            logging.info(f"Preprocessed message:\n{'-' * 40}\n{cleaned}\n{'-' * 40}")
             return cleaned
-            
+
         except Exception as e:
             logging.error(f"Error preprocessing message: {e}")
             return message
-
 
     async def process_message(self, message: str, custom_prompt: Optional[str] = None) -> Optional[List[TradingSignal]]:
         """处理消息并提取交易信号（支持返回多个有效信号）"""
         try:
             prompt = custom_prompt if custom_prompt else self.default_prompt
-            
-            logging.info(f"Original message:\n{'-'*40}\n{message}\n{'-'*40}")
+
+            logging.info(f"Original message:\n{'-' * 40}\n{message}\n{'-' * 40}")
             cleaned_message = self._preprocess_message(message)
             # 提取并拼接引用消息
             quote_pattern = re.compile(r'>(.*?)(?=\n|$)', re.DOTALL)
@@ -459,9 +504,9 @@ TURNOVER 定义
             if quote_matches:
                 quote_text = "\n".join([q.strip() for q in quote_matches])
                 cleaned_message = f"{cleaned_message}\n【引用消息】\n{quote_text}"
-            
-            logging.info(f"Preprocessed message (with quote):\n{'-'*40}\n{cleaned_message}\n{'-'*40}")
-            #return cleaned_message
+
+            logging.info(f"Preprocessed message (with quote):\n{'-' * 40}\n{cleaned_message}\n{'-' * 40}")
+            # return cleaned_message
 
             # 根据是否存在当前委托/持仓，维护消息历史并决定上传内容
             open_orders = None
@@ -477,7 +522,7 @@ TURNOVER 定义
             except Exception:
                 open_orders = None
             now_ts = datetime.now()
-            has_position_text = ("当前持仓" in cleaned_message) or ("当前委托" in cleaned_message)
+            has_position_text = ("当前持仓:" in cleaned_message) or ("当前委托:" in cleaned_message)
             active = bool(open_orders) or has_position_text
             user_content = cleaned_message
             if not active:
@@ -488,7 +533,7 @@ TURNOVER 定义
                     self._open_active = True
                     self._message_history = []
                 # 移除消息中的持仓/委托信息后存入历史
-                cleaned_for_history = re.sub(r'当前[持仓委托]:[\s\S]*?(?=\n\n|\Z)', '', cleaned_message).strip()
+                cleaned_for_history = re.split(r'\n{2,}当前(?:持仓|委托):', cleaned_message, maxsplit=1)[0].strip()
                 self._message_history.append({'ts': now_ts.strftime('%Y-%m-%d %H:%M:%S'), 'text': cleaned_for_history})
                 try:
                     oo_text = ""
@@ -514,30 +559,40 @@ TURNOVER 定义
 
             # logging.info(f"Using prompt:\n{'-'*40}\n{prompt}\n{'-'*40}")
             logging.info(f"user_content: {user_content}")
+            openai_request_payload = {
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": user_content}
+                ],
+                "temperature": 0.7,
+                "max_tokens": 1024
+            }
             try:
                 response = self.openai_client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[
+                    **openai_request_payload
+                )
+                self._write_llm_debug_entry("openai", openai_request_payload, response=response)
+            except Exception as e:
+                self._write_llm_debug_entry("openai", openai_request_payload, error=e)
+                logging.warning(f"OpenAI 接口调用失败: {e}，尝试使用 qwen 接口")
+                deepseek_request_payload = {
+                    "model": "deepseek-chat",
+                    "messages": [
                         {"role": "system", "content": prompt},
                         {"role": "user", "content": user_content}
                     ],
-                    temperature=0.7,
-                    max_tokens=1024
-                )
-            except Exception as e:
-                logging.warning(f"OpenAI 接口调用失败: {e}，尝试使用 qwen 接口")
+                    "temperature": 0.7,
+                    "max_tokens": 1024
+                }
                 try:
                     # 使用 deepseek 接口作为备选
                     response = self.deepseekClient.chat.completions.create(
-                        model="deepseek-chat",  # 假设 deepseek 提供的模型名称
-                        messages=[
-                            {"role": "system", "content": prompt},
-                            {"role": "user", "content": user_content}
-                        ],
-                        temperature=0.7,
-                        max_tokens=1024
+                        **deepseek_request_payload
                     )
+                    self._write_llm_debug_entry("deepseek", deepseek_request_payload, response=response)
                 except Exception as deepseek_e:
+                    self._write_llm_debug_entry("deepseek", deepseek_request_payload, error=deepseek_e)
                     logging.error(f"deepseek 接口也调用失败: {deepseek_e}")
                     raise deepseek_e
             self._last_message_ts = now_ts
@@ -563,8 +618,8 @@ TURNOVER 定义
                         response_text = str(response)
                     except Exception:
                         response_text = ""
-            logging.info(f"GPT response:\n{'-'*40}\n{response_text}\n{'-'*40}")
-            
+            logging.info(f"GPT response:\n{'-' * 40}\n{response_text}\n{'-' * 40}")
+
             signal_dict_or_list = self._parse_response(response_text)
             if signal_dict_or_list:
                 if isinstance(signal_dict_or_list, list):
@@ -572,7 +627,8 @@ TURNOVER 定义
                     valid_signals: List[TradingSignal] = []
                     for idx, item in enumerate(signal_dict_or_list, 1):
                         try:
-                            logging.info(f"Processing item {idx}:\n{'-'*40}\n{json.dumps(item, indent=2)}\n{'-'*40}")
+                            logging.info(
+                                f"Processing item {idx}:\n{'-' * 40}\n{json.dumps(item, indent=2)}\n{'-' * 40}")
                         except Exception:
                             logging.info(f"Processing item {idx}")
                         if self._validate_json_data(item):
@@ -594,7 +650,8 @@ TURNOVER 定义
                     else:
                         logging.error("No valid signals parsed from array")
                 else:
-                    logging.info(f"Parsed signal dictionary:\n{'-'*40}\n{json.dumps(signal_dict_or_list, indent=2)}\n{'-'*40}")
+                    logging.info(
+                        f"Parsed signal dictionary:\n{'-' * 40}\n{json.dumps(signal_dict_or_list, indent=2)}\n{'-' * 40}")
                     if self._validate_json_data(signal_dict_or_list):
                         normalized_dict = self._normalize_numbers(signal_dict_or_list)
                         signal = self._convert_to_trading_signal(normalized_dict)
@@ -613,7 +670,7 @@ TURNOVER 定义
                 logging.error("Failed to parse GPT response")
 
             return None
-            
+
         except Exception as e:
             logging.error(f"Error processing message: {e}")
             import traceback
@@ -667,7 +724,7 @@ TURNOVER 定义
         try:
             # 记录开始解析
             logging.info("Starting to parse GPT response")
-            
+
             # 清除注释
             cleaned_text = ""
             for line in response_text.split('\n'):
@@ -677,7 +734,7 @@ TURNOVER 定义
                 line = re.sub(r'/\*.*?\*/', '', line)
                 if line.strip():
                     cleaned_text += line + "\n"
-                    
+
             # 直接解析完整文本为JSON（可能是对象或数组）
             try:
                 direct_parsed = json.loads(cleaned_text.strip())
@@ -689,40 +746,40 @@ TURNOVER 定义
                     return direct_parsed
             except Exception:
                 pass
-            
+
             # 尝试提取JSON数组
             array_match = re.search(r'\[.*\]', cleaned_text, re.DOTALL)
             if array_match:
                 array_str = array_match.group()
-                logging.info(f"Extracted JSON array string:\n{'-'*40}\n{array_str}\n{'-'*40}")
+                logging.info(f"Extracted JSON array string:\n{'-' * 40}\n{array_str}\n{'-' * 40}")
                 try:
                     arr = json.loads(array_str)
                     if isinstance(arr, list):
                         return [item for item in arr if isinstance(item, dict)]
                 except Exception as e:
                     logging.warning(f"Failed to parse JSON array: {e}")
-            
+
             # 退回到提取单个JSON对象
             json_match = re.search(r'{.*}', cleaned_text, re.DOTALL)
             if not json_match:
                 logging.warning("No JSON found in response")
                 return None
             json_str = json_match.group()
-            logging.info(f"Extracted JSON object string:\n{'-'*40}\n{json_str}\n{'-'*40}")
-            
+            logging.info(f"Extracted JSON object string:\n{'-' * 40}\n{json_str}\n{'-' * 40}")
+
             # 解析JSON
             parsed_data = json.loads(json_str)
-            logging.info(f"Successfully parsed JSON:\n{'-'*40}\n{json.dumps(parsed_data, indent=2)}\n{'-'*40}")
-            
+            logging.info(f"Successfully parsed JSON:\n{'-' * 40}\n{json.dumps(parsed_data, indent=2)}\n{'-' * 40}")
+
             # 验证必要字段
             required_fields = ['exchange', 'symbol', 'action']
             missing_fields = [field for field in required_fields if field not in parsed_data]
             if missing_fields:
                 logging.warning(f"Missing required fields: {missing_fields}")
                 return None
-            
+
             return parsed_data
-                
+
         except json.JSONDecodeError as e:
             logging.error(f"JSON decode error: {e}")
             logging.error(f"Problematic text:\n{response_text}")
@@ -731,37 +788,36 @@ TURNOVER 定义
             logging.error(f"Error parsing GPT response: {e}")
             return None
 
-
     def _validate_and_complete_signal(self, signal: TradingSignal) -> Optional[TradingSignal]:
         """验证并补充信号信息"""
         try:
             # 验证基本字段
             if not all([signal.exchange, signal.symbol, signal.action]):
                 return None
-            
+
             # 确保有入场价格或区间
             if not signal.entry_price and not signal.entry_zones:
                 return None
-            
+
             # 验证动作类型
             if signal.action not in ['OPEN_LONG', 'OPEN_SHORT', 'CLOSE']:
                 return None
-            
+
             # 如果没有止损，计算默认止损
             if not signal.stop_loss and signal.action != 'CLOSE':
                 signal.stop_loss = self._calculate_default_stop_loss(signal)
-            
+
             # 如果没有止盈等级，设置默认止盈
             if not signal.take_profit_levels and signal.action != 'CLOSE':
                 signal.take_profit_levels = self._calculate_default_take_profits(signal)
-            
+
             # 验证风险比率
             if not self._validate_risk_ratio(signal):
                 logging.warning(f"Invalid risk ratio for signal: {signal.symbol}")
                 return None
-            
+
             return signal
-            
+
         except Exception as e:
             logging.error(f"Error validating signal: {e}")
             return None
@@ -774,15 +830,15 @@ TURNOVER 定义
                 # 使用区间入场的中间价格
                 prices = [zone.price for zone in signal.entry_zones]
                 entry_price = sum(prices) / len(prices)
-            
+
             # 默认使用2%的止损距离
             stop_distance = entry_price * 0.02
-            
+
             if signal.action == 'OPEN_LONG':
                 return entry_price - stop_distance
             else:  # OPEN_SHORT
                 return entry_price + stop_distance
-                
+
         except Exception as e:
             logging.error(f"Error calculating default stop loss: {e}")
             return 0
@@ -794,14 +850,14 @@ TURNOVER 定义
             if not entry_price and signal.entry_zones:
                 prices = [zone.price for zone in signal.entry_zones]
                 entry_price = sum(prices) / len(prices)
-            
+
             # 计算止损距离
             stop_distance = abs(entry_price - signal.stop_loss)
-            
+
             # 设置三个止盈目标，分别是2R、3R和4R
             multipliers = [2, 3, 4]  # R倍数
             percentages = [0.4, 0.3, 0.3]  # 每个目标的仓位比例
-            
+
             tp_levels = []
             for mult, pct in zip(multipliers, percentages):
                 if signal.action == 'OPEN_LONG':
@@ -809,9 +865,9 @@ TURNOVER 定义
                 else:  # OPEN_SHORT
                     price = entry_price - (stop_distance * mult)
                 tp_levels.append(TakeProfitLevel(price, pct))
-            
+
             return tp_levels
-            
+
         except Exception as e:
             logging.error(f"Error calculating default take profits: {e}")
             return []
@@ -821,15 +877,15 @@ TURNOVER 定义
         try:
             if signal.action == 'CLOSE':
                 return True
-            
+
             entry_price = signal.entry_price
             if not entry_price and signal.entry_zones:
                 prices = [zone.price for zone in signal.entry_zones]
                 entry_price = sum(prices) / len(prices)
-            
+
             if not signal.stop_loss or not signal.take_profit_levels:
                 return False
-            
+
             # 计算回报
             if signal.action == 'OPEN_LONG':
                 highest_tp = max(tp.price for tp in signal.take_profit_levels)
@@ -839,10 +895,10 @@ TURNOVER 定义
                 lowest_tp = min(tp.price for tp in signal.take_profit_levels)
                 reward = entry_price - lowest_tp
                 risk = signal.stop_loss - entry_price
-            
+
             # 要求至少1:1.5的风险收益比
             return (reward / risk) >= 1.5 if risk > 0 else False
-            
+
         except Exception as e:
             logging.error(f"Error validating risk ratio: {e}")
             return False
@@ -858,9 +914,9 @@ TURNOVER 定义
                 'risk_level': self._assess_risk_level(signal),
                 'recommendation': self._generate_recommendation(signal)
             }
-            
+
             return analysis
-            
+
         except Exception as e:
             logging.error(f"Error generating analysis: {e}")
             return {}
@@ -896,7 +952,7 @@ TURNOVER 定义
         try:
             # 计算风险分数
             risk_score = 0
-            
+
             # 基于杠杆的风险
             if signal.leverage > 20:
                 risk_score += 3
@@ -904,13 +960,13 @@ TURNOVER 定义
                 risk_score += 2
             elif signal.leverage > 5:
                 risk_score += 1
-            
+
             # 基于止损距离的风险
             entry_price = signal.entry_price
             if not entry_price and signal.entry_zones:
                 prices = [zone.price for zone in signal.entry_zones]
                 entry_price = sum(prices) / len(prices)
-            
+
             stop_distance = abs(entry_price - signal.stop_loss) / entry_price * 100
             if stop_distance < 1:
                 risk_score += 3
@@ -918,7 +974,7 @@ TURNOVER 定义
                 risk_score += 2
             elif stop_distance < 3:
                 risk_score += 1
-            
+
             # 基于风险收益比的风险
             rr_ratio = self.calculate_risk_reward_ratio(signal)
             if rr_ratio < 1.5:
@@ -927,7 +983,7 @@ TURNOVER 定义
                 risk_score += 2
             elif rr_ratio < 2.5:
                 risk_score += 1
-            
+
             # 返回风险等级
             if risk_score >= 7:
                 return 'HIGH'
@@ -935,7 +991,7 @@ TURNOVER 定义
                 return 'MEDIUM'
             else:
                 return 'LOW'
-                
+
         except Exception as e:
             logging.error(f"Error assessing risk level: {e}")
             return 'MEDIUM'
@@ -947,7 +1003,7 @@ TURNOVER 定义
             if not entry_price and signal.entry_zones:
                 prices = [zone.price for zone in signal.entry_zones]
                 entry_price = sum(prices) / len(prices)
-            
+
             if signal.action == 'OPEN_LONG':
                 if signal.take_profit_levels:
                     highest_tp = max(tp.price for tp in signal.take_profit_levels)
@@ -962,9 +1018,9 @@ TURNOVER 定义
                 else:
                     reward = entry_price - signal.take_profit
                 risk = signal.stop_loss - entry_price
-            
+
             return reward / risk if risk > 0 else 0
-            
+
         except Exception as e:
             logging.error(f"Error calculating risk reward ratio: {e}")
             return 0
@@ -974,7 +1030,7 @@ TURNOVER 定义
         try:
             risk_level = self._assess_risk_level(signal)
             rr_ratio = self.calculate_risk_reward_ratio(signal)
-            
+
             if risk_level == 'HIGH':
                 return "🔴 高风险交易，建议减小仓位或放弃此交易机会"
             elif risk_level == 'MEDIUM':
@@ -987,39 +1043,39 @@ TURNOVER 定义
                     return "🟢 低风险高收益，建议按计划执行"
                 else:
                     return "🟢 低风险，但收益相对较小，可以考虑增加仓位"
-                    
+
         except Exception as e:
             logging.error(f"Error generating recommendation: {e}")
             return "无法生成建议"
 
     def calculate_position_size(self, account_balance: float, risk_per_trade: float,
-                              signal: TradingSignal) -> float:
+                                signal: TradingSignal) -> float:
         """计算建议仓位大小"""
         try:
             # 基于账户风险计算
             risk_amount = account_balance * (risk_per_trade / 100)  # 风险金额
-            
+
             entry_price = signal.entry_price
             if not entry_price and signal.entry_zones:
                 prices = [zone.price for zone in signal.entry_zones]
                 entry_price = sum(prices) / len(prices)
-            
+
             # 计算每单位的风险
             stop_distance = abs(entry_price - signal.stop_loss)
             risk_per_unit = stop_distance * signal.leverage
-            
+
             # 计算建议仓位
             position_size = risk_amount / risk_per_unit
-            
+
             # 根据风险等级调整仓位
             risk_level = self._assess_risk_level(signal)
             if risk_level == 'HIGH':
                 position_size *= 0.5
             elif risk_level == 'MEDIUM':
                 position_size *= 0.75
-            
+
             return position_size
-            
+
         except Exception as e:
             logging.error(f"Error calculating position size: {e}")
             return 0
@@ -1029,7 +1085,7 @@ TURNOVER 定义
         try:
             # TODO: 获取市场数据
             market_data = {}  # 这里应该从数据源获取市场数据
-            
+
             analysis = {
                 'market_trend': self._analyze_market_trend(market_data),
                 'volume_analysis': self._analyze_volume(market_data),
@@ -1037,9 +1093,9 @@ TURNOVER 定义
                 'correlation': self._analyze_correlation(market_data),
                 'sentiment': await self._analyze_market_sentiment(signal.symbol)
             }
-            
+
             return analysis
-            
+
         except Exception as e:
             logging.error(f"Error analyzing market context: {e}")
             return {}
@@ -1091,7 +1147,7 @@ TURNOVER 定义
             if not entry_price and signal.entry_zones:
                 prices = [zone.price for zone in signal.entry_zones]
                 entry_price = sum(prices) / len(prices)
-            
+
             # 验证止损位置
             if signal.stop_loss:
                 if signal.action == 'OPEN_LONG':
@@ -1100,7 +1156,7 @@ TURNOVER 定义
                 else:
                     if signal.stop_loss <= entry_price:
                         return False
-            
+
             # 验证止盈位置
             if signal.take_profit_levels:
                 for tp in signal.take_profit_levels:
@@ -1110,24 +1166,24 @@ TURNOVER 定义
                     else:
                         if tp.price >= entry_price:
                             return False
-            
+
             # 验证价格间隔
             min_price_distance = 0.001  # 最小价格间隔
-            
+
             if signal.entry_zones:
                 prices = sorted(zone.price for zone in signal.entry_zones)
                 for i in range(1, len(prices)):
-                    if abs(prices[i] - prices[i-1]) < min_price_distance:
+                    if abs(prices[i] - prices[i - 1]) < min_price_distance:
                         return False
-            
+
             return True
-            
+
         except Exception as e:
             logging.error(f"Error validating technical levels: {e}")
             return False
 
     def adjust_for_market_conditions(self, signal: TradingSignal,
-                                   market_conditions: Dict[str, Any]) -> TradingSignal:
+                                     market_conditions: Dict[str, Any]) -> TradingSignal:
         """根据市场条件调整信号"""
         try:
             # 根据波动性调整止损距离
@@ -1138,12 +1194,12 @@ TURNOVER 定义
                     entry_price = signal.entry_price or signal.entry_zones[0].price
                     current_distance = abs(entry_price - signal.stop_loss)
                     adjusted_distance = current_distance * 1.2  # 增加20%止损距离
-                    
+
                     if signal.action == 'OPEN_LONG':
                         signal.stop_loss = entry_price - adjusted_distance
                     else:
                         signal.stop_loss = entry_price + adjusted_distance
-            
+
             # 根据趋势强度调整止盈目标
             trend_strength = market_conditions.get('trend_strength', 'NORMAL')
             if trend_strength == 'STRONG' and signal.take_profit_levels:
@@ -1151,20 +1207,20 @@ TURNOVER 定义
                 last_tp = signal.take_profit_levels[-1]
                 entry_price = signal.entry_price or signal.entry_zones[0].price
                 current_distance = abs(entry_price - last_tp.price)
-                
+
                 if signal.action == 'OPEN_LONG':
                     last_tp.price = entry_price + (current_distance * 1.2)
                 else:
                     last_tp.price = entry_price - (current_distance * 1.2)
-            
+
             return signal
-            
+
         except Exception as e:
             logging.error(f"Error adjusting for market conditions: {e}")
             return signal
 
     def generate_trade_report(self, signal: TradingSignal,
-                            analysis: Dict[str, Any]) -> str:
+                              analysis: Dict[str, Any]) -> str:
         """生成交易报告"""
         try:
             report = []
@@ -1172,34 +1228,34 @@ TURNOVER 定义
             report.append("\n🎯 交易信号:")
             report.append(f"交易对: {signal.symbol}")
             report.append(f"方向: {'做多' if signal.action == 'OPEN_LONG' else '做空'}")
-            
+
             if signal.entry_zones:
                 report.append("\n📍 入场区间:")
                 for idx, zone in enumerate(signal.entry_zones, 1):
-                    report.append(f"区间 {idx}: {zone.price} ({zone.percentage*100}%)")
+                    report.append(f"区间 {idx}: {zone.price} ({zone.percentage * 100}%)")
             else:
                 report.append(f"\n📍 入场价格: {signal.entry_price}")
-            
+
             if signal.take_profit_levels:
                 report.append("\n🎯 止盈目标:")
                 for idx, tp in enumerate(signal.take_profit_levels, 1):
-                    report.append(f"TP{idx}: {tp.price} ({tp.percentage*100}%)")
-            
+                    report.append(f"TP{idx}: {tp.price} ({tp.percentage * 100}%)")
+
             report.append(f"\n🛑 止损: {signal.stop_loss}")
-            
+
             report.append(f"\n📈 风险收益比: {self.calculate_risk_reward_ratio(signal):.2f}")
             report.append(f"⚠️ 风险等级: {self._assess_risk_level(signal)}")
-            
+
             if analysis:
                 report.append("\n📊 市场分析:")
                 report.append(f"趋势: {analysis.get('trend', {}).get('direction', 'N/A')}")
                 report.append(f"强度: {analysis.get('momentum', {}).get('strength', 'N/A')}")
                 report.append(f"成交量: {analysis.get('volume', {}).get('trend', 'N/A')}")
-            
+
             report.append(f"\n💡 建议: {self._generate_recommendation(signal)}")
-            
+
             return "\n".join(report)
-            
+
         except Exception as e:
             logging.error(f"Error generating trade report: {e}")
             return "无法生成交易报告"

@@ -10,3 +10,5 @@ bot.log
 *.sqlite
 .session-journal
 *.log
+/.idea
+*.online

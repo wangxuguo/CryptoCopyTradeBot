@@ -2,7 +2,7 @@
 
 from enum import Enum
 import asyncio
-import json 
+import json
 import math
 import hmac
 import hashlib
@@ -24,13 +24,15 @@ from models import (
     TradingSignal,
     OrderResult,
     EntryZone,
-    TakeProfitLevel  
+    TakeProfitLevel
 )
+
 
 # Constants
 class OrderSide:
     BUY = 'buy'
     SELL = 'sell'
+
 
 class OrderType:
     MARKET = 'MARKET'
@@ -39,6 +41,7 @@ class OrderType:
     STOP_MARKET = 'STOP_MARKET'
     TAKE_PROFIT = 'TAKE_PROFIT'
     TAKE_PROFIT_MARKET = 'TAKE_PROFIT_MARKET'
+
 
 class OrderStatus:
     PENDING = 'PENDING'
@@ -54,12 +57,14 @@ class PositionSide(str, Enum):
     LONG = 'long'
     SHORT = 'short'
 
+
 class MarginType(str, Enum):
     """Margin type enum"""
     CROSS = 'cross'
     ISOLATED = 'isolated'
 
-@dataclass 
+
+@dataclass
 class ExchangeCredentials:
     """Exchange credentials configuration"""
     api_key: str
@@ -70,12 +75,13 @@ class ExchangeCredentials:
     test_passphrase: Optional[str] = None
     testnet: bool = False
 
+
 # 或者如果你希望保持完全一致的话,可以这样定义:
-@dataclass 
+@dataclass
 class OrderParams:
     """Order parameters (Legacy class for backwards compatibility)"""
     symbol: str
-    side: str 
+    side: str
     order_type: str
     amount: float
     price: Optional[float] = None
@@ -91,20 +97,20 @@ class OrderParams:
         try:
             if not all([self.symbol, self.side, self.order_type, self.amount > 0]):
                 return False
-            
+
             if self.order_type == OrderType.LIMIT and not self.price:
                 return False
-                
+
             if self.order_type in [OrderType.STOP, OrderType.TAKE_PROFIT] and not self.stop_price:
                 return False
-                
+
             return True
-            
+
         except Exception:
             return False
 
 
-@dataclass 
+@dataclass
 class OrderInfo:
     """Order information"""
     id: str
@@ -125,7 +131,8 @@ class OrderInfo:
         """Create OrderInfo from exchange order data"""
         try:
             info = order.get('info', {}) if isinstance(order, dict) else {}
-            clid = order.get('clientOrderId') or order.get('clOrdId') or info.get('clientOrderId') or info.get('clOrdId')
+            clid = order.get('clientOrderId') or order.get('clOrdId') or info.get('clientOrderId') or info.get(
+                'clOrdId')
             return OrderInfo(
                 id=order['id'],
                 symbol=order['symbol'],
@@ -137,23 +144,24 @@ class OrderInfo:
                 remaining=float(order.get('remaining', order['amount'])),
                 status=order['status'],
                 fee=order.get('fee', {}),
-                timestamp=datetime.fromtimestamp(order['timestamp']/1000),
+                timestamp=datetime.fromtimestamp(order['timestamp'] / 1000),
                 cl_ord_id=str(clid) if clid else None
             )
         except Exception as e:
             logging.error(f"Error creating OrderInfo: {e}")
             return None
 
+
 # 首先修复数据模型
 @dataclass
 class AccountBalance:
     """Account balance information"""
     total_equity: float = 0.0  # 总权益
-    used_margin: float = 0.0   # 已用保证金
-    free_margin: float = 0.0   # 可用保证金
+    used_margin: float = 0.0  # 已用保证金
+    free_margin: float = 0.0  # 可用保证金
     margin_ratio: float = 0.0  # 保证金率
     unrealized_pnl: float = 0.0  # 未实现盈亏
-    realized_pnl: float = 0.0    # 已实现盈亏
+    realized_pnl: float = 0.0  # 已实现盈亏
     timestamp: datetime = field(default_factory=datetime.now)
 
     @property
@@ -175,7 +183,7 @@ class AccountBalance:
             total = float(balance.get('total', {}).get('USDT', 0) or 0)
             used = float(balance.get('used', {}).get('USDT', 0) or 0)
             free = float(balance.get('free', {}).get('USDT', 0) or 0)
-            
+
             return AccountBalance(
                 total_equity=total,
                 used_margin=used,
@@ -199,29 +207,29 @@ class PositionInfo:
     entry_price: float
     margin_mode: MarginType
     leverage: int
-    
+
     # 价格相关
     liquidation_price: Optional[float] = None
     mark_price: Optional[float] = 0
     break_even_price: Optional[float] = None
-    
+
     # 保证金相关
     initial_margin: float = 0
     maintenance_margin: float = 0
     position_initial_margin: float = 0  # 持仓保证金
     open_order_initial_margin: float = 0  # 委托单保证金
     isolated_margin: float = 0  # 逐仓保证金
-    
+
     # 盈亏相关
     unrealized_pnl: float = 0
     realized_pnl: float = 0
     pnl_percentage: float = 0
-    
+
     # 其他
     notional: float = 0  # 名义价值
     collateral: float = 0  # 可用保证金
     timestamp: datetime = field(default_factory=datetime.now)
-    
+
     def get(self, key: str, default: Any = None) -> Any:
         """Support dict-like get method for compatibility"""
         return getattr(self, key, default)
@@ -231,21 +239,20 @@ class PositionInfo:
         """Create PositionInfo from exchange position data"""
         try:
             logging.info(f"ExchangeInfo -- {pos}")
-            
+
             # 处理空仓位情况
             position_amt = float(pos.get('contracts', 0) or pos.get('positionAmt', 0) or 0)
             if position_amt == 0:
                 return None
-            
-            
+
             # 判断多空方向
             side = PositionSide.LONG if (
-                pos.get('side') == 'long' 
+                    pos.get('side') == 'long'
             ) else PositionSide.SHORT
-            
+
             # 判断杠杆模式
             margin_mode = MarginType.ISOLATED if pos.get('marginMode') == 'isolated' else MarginType.CROSS
-            
+
             return PositionInfo(
                 # 基础信息
                 symbol=pos['symbol'],
@@ -254,24 +261,24 @@ class PositionInfo:
                 entry_price=float(pos.get('entryPrice', 0) or 0),
                 margin_mode=margin_mode,
                 leverage=int(float(pos.get('leverage', 1) or 1)),
-                
+
                 # 价格相关
                 liquidation_price=float(pos.get('liquidationPrice', 0) or 0),
                 mark_price=float(pos.get('markPrice', 0) or 0),
                 break_even_price=float(pos.get('breakEvenPrice', 0) or 0),
-                
+
                 # 保证金相关
                 initial_margin=float(pos.get('initialMargin', 0) or 0),
                 maintenance_margin=float(pos.get('maintenanceMargin', 0) or 0),
                 position_initial_margin=float(pos.get('positionInitialMargin', 0) or 0),
                 open_order_initial_margin=float(pos.get('openOrderInitialMargin', 0) or 0),
                 isolated_margin=float(pos.get('isolatedMargin', 0) or 0),
-                
+
                 # 盈亏相关
                 unrealized_pnl=float(pos.get('unrealizedPnl', 0) or pos.get('unRealizedProfit', 0) or 0),
                 realized_pnl=float(pos.get('realizedPnl', 0) or 0),
                 pnl_percentage=float(pos.get('percentage', 0) or 0),
-                
+
                 # 其他
                 notional=float(pos.get('notional', 0) or 0),
                 collateral=float(pos.get('collateral', 0) or 0)
@@ -283,18 +290,19 @@ class PositionInfo:
     def is_long(self) -> bool:
         """Check if position is long"""
         return self.side == PositionSide.LONG
-    
+
     def is_short(self) -> bool:
         """Check if position is short"""
         return self.side == PositionSide.SHORT
-    
+
     def is_isolated(self) -> bool:
         """Check if position is isolated margin"""
         return self.margin_mode == MarginType.ISOLATED
-    
+
     def is_cross(self) -> bool:
         """Check if position is cross margin"""
         return self.margin_mode == MarginType.CROSS
+
 
 @dataclass
 class MarketInfo:
@@ -305,7 +313,7 @@ class MarketInfo:
     price_precision: int
     amount_precision: int
     min_amount: float
-    min_cost: float 
+    min_cost: float
     market_type: str
     contract_size: float = 1.0
     last_price: Optional[float] = None
@@ -328,7 +336,7 @@ class MarketInfo:
             precision = market.get('precision', {})
             limits = market.get('limits', {})
             info = market.get('info', {})
-            
+
             return MarketInfo(
                 symbol=market['symbol'],
                 base=market.get('base', ''),
@@ -342,8 +350,8 @@ class MarketInfo:
                 min_cost=safe_float(limits.get('cost', {}).get('min')),
                 market_type=market.get('type', 'swap' if info.get('instType') == 'SWAP' else 'spot'),
                 contract_size=(
-                    safe_float(market.get('contractSize'), 0.0) or
-                    safe_float(info.get('ctVal'), 1.0)
+                        safe_float(market.get('contractSize'), 0.0) or
+                        safe_float(info.get('ctVal'), 1.0)
                 ),
                 last_price=safe_float(ticker.get('last')) if ticker else None,
                 mark_price=safe_float(ticker.get('mark')) if ticker else None,
@@ -358,21 +366,26 @@ class ExchangeException(Exception):
     """Base exchange exception"""
     pass
 
+
 class OrderException(ExchangeException):
     """Order related exception"""
     pass
 
+
 class PositionException(ExchangeException):
     """Position related exception"""
-    pass 
+    pass
+
 
 class MarketException(ExchangeException):
     """Market data related exception"""
     pass
 
+
 class NetworkException(ExchangeException):
     """Network related exception"""
     pass
+
 
 class ExchangeClient(ABC):
     """Base exchange client implementation"""
@@ -383,15 +396,15 @@ class ExchangeClient(ABC):
         self._last_request_time = 0
         self.min_request_interval = 0.1
         self._session: Optional[aiohttp.ClientSession] = None
-        
+
         # Cache
         self._market_cache: Dict[str, MarketInfo] = {}
         self._market_cache_time: Dict[str, float] = {}
-        self._balance_cache: Optional[AccountBalance] = None 
+        self._balance_cache: Optional[AccountBalance] = None
         self._balance_cache_time: float = 0
         self._position_cache: Dict[str, PositionInfo] = {}
         self._position_cache_time: Dict[str, float] = {}
-        
+
         self.CACHE_DURATION = 5  # seconds
 
     async def initialize(self) -> bool:
@@ -400,16 +413,16 @@ class ExchangeClient(ABC):
             # Setup exchange
             if not await self._setup_exchange():
                 return False
-                
+
             # Load markets
             await self._load_markets()
-            
+
             # Initialize session
             if not self._session:
                 self._session = aiohttp.ClientSession()
-                
+
             return True
-            
+
         except Exception as e:
             logging.error(f"Error initializing exchange client: {e}")
             return False
@@ -451,7 +464,8 @@ class ExchangeClient(ABC):
             return f"{base}/{quote}:USDT"
         return f"{base}/{quote}"
 
-    async def _okx_request(self, path: str, method: str, payload: Optional[Dict[str, Any]] = None, query: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def _okx_request(self, path: str, method: str, payload: Optional[Dict[str, Any]] = None,
+                           query: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         ts = datetime.utcnow().isoformat(timespec='milliseconds') + 'Z'
         m = method.upper()
         q = urlencode(query or {})
@@ -478,7 +492,8 @@ class ExchangeClient(ABC):
             async with self._session.get(url, headers=headers) as resp:
                 data = await resp.json()
                 try:
-                    logging.info(f"OKX response: path={path} code={str(data.get('code')) if isinstance(data, dict) else 'N/A'}")
+                    logging.info(
+                        f"OKX response: path={path} code={str(data.get('code')) if isinstance(data, dict) else 'N/A'}")
                 except Exception:
                     pass
                 return data
@@ -486,12 +501,14 @@ class ExchangeClient(ABC):
             async with self._session.post(url, headers=headers, data=body) as resp:
                 data = await resp.json()
                 try:
-                    logging.info(f"OKX response: path={path} code={str(data.get('code')) if isinstance(data, dict) else 'N/A'}")
+                    logging.info(
+                        f"OKX response: path={path} code={str(data.get('code')) if isinstance(data, dict) else 'N/A'}")
                 except Exception:
                     pass
                 return data
 
-    async def _okx_create_order(self, symbol: str, type_arg: str, side_arg: str, amount_arg: float, price_arg: Optional[float], params: Dict[str, Any]) -> Dict[str, Any]:
+    async def _okx_create_order(self, symbol: str, type_arg: str, side_arg: str, amount_arg: float,
+                                price_arg: Optional[float], params: Dict[str, Any]) -> Dict[str, Any]:
         market = await asyncio.to_thread(self._exchange.market, symbol)
         inst_id = market.get('id')
         body: Dict[str, Any] = {
@@ -532,17 +549,20 @@ class ExchangeClient(ABC):
         if attach_list:
             body['attachAlgoOrds'] = attach_list
         try:
-            logging.info(f"OKX create order: instId={inst_id} side={side_arg.lower()} type={type_arg.lower()} sz={body['sz']} px={body.get('px')} tdMode={body.get('tdMode')} posSide={body.get('posSide')} reduceOnly={body.get('reduceOnly')} lever={body.get('lever')} clOrdId={'Y' if body.get('clOrdId') else 'N'} attachAlgoOrds_count={len(body.get('attachAlgoOrds', []))}")
+            logging.info(
+                f"OKX create order: instId={inst_id} side={side_arg.lower()} type={type_arg.lower()} sz={body['sz']} px={body.get('px')} tdMode={body.get('tdMode')} posSide={body.get('posSide')} reduceOnly={body.get('reduceOnly')} lever={body.get('lever')} clOrdId={'Y' if body.get('clOrdId') else 'N'} attachAlgoOrds_count={len(body.get('attachAlgoOrds', []))}")
         except Exception:
             pass
         raw = await self._okx_request('/api/v5/trade/order', 'POST', body)
         try:
-            logging.info(f"OKX create order result: code={str(raw.get('code')) if isinstance(raw, dict) else 'N/A'} data_count={len(raw.get('data', [])) if isinstance(raw, dict) else 'N/A'}")
+            logging.info(
+                f"OKX create order result: code={str(raw.get('code')) if isinstance(raw, dict) else 'N/A'} data_count={len(raw.get('data', [])) if isinstance(raw, dict) else 'N/A'}")
         except Exception:
             pass
         return raw
 
-    async def _okx_amend_order(self, symbol: str, ord_id: Optional[str], cl_ord_id: Optional[str], new_px: Optional[float]) -> Dict[str, Any]:
+    async def _okx_amend_order(self, symbol: str, ord_id: Optional[str], cl_ord_id: Optional[str],
+                               new_px: Optional[float]) -> Dict[str, Any]:
         try:
             market = await asyncio.to_thread(self._exchange.market, symbol)
             inst_id = market.get('id')
@@ -565,7 +585,8 @@ class ExchangeClient(ABC):
                         px = min_sell
                 body['newPx'] = str(px)
             try:
-                logging.info(f"OKX amend order: instId={inst_id} ordId={str(ord_id) if ord_id else ''} clOrdId={str(cl_ord_id) if cl_ord_id else ''} newPx={body.get('newPx')}")
+                logging.info(
+                    f"OKX amend order: instId={inst_id} ordId={str(ord_id) if ord_id else ''} clOrdId={str(cl_ord_id) if cl_ord_id else ''} newPx={body.get('newPx')}")
             except Exception:
                 pass
             raw = await self._okx_request('/api/v5/trade/amend-order', 'POST', body)
@@ -601,10 +622,12 @@ class ExchangeClient(ABC):
             return None
 
     async def _okx_attach_tp_sl(self, symbol: str, side_close: str, amount_contracts: int, td_mode: str,
-                                pos_side: Optional[str], tp_price: Optional[float], sl_price: Optional[float]) -> Dict[str, Any]:
+                                pos_side: Optional[str], tp_price: Optional[float], sl_price: Optional[float]) -> Dict[
+        str, Any]:
         market = await asyncio.to_thread(self._exchange.market, symbol)
         inst_id = market.get('id')
         limits = await self._okx_get_price_limit(symbol)
+
         def clamp(px: Optional[float]) -> Optional[float]:
             if px is None:
                 return None
@@ -617,8 +640,10 @@ class ExchangeClient(ABC):
                 if side_close.lower() == 'sell' and min_sell is not None and v < min_sell:
                     v = min_sell
             return v
+
         try:
-            logging.info(f"OKX attach TP/SL start: instId={inst_id} side_close={side_close.lower()} amount_contracts={amount_contracts} tdMode={td_mode} posSide={pos_side} tp_price_req={tp_price} sl_price_req={sl_price}")
+            logging.info(
+                f"OKX attach TP/SL start: instId={inst_id} side_close={side_close.lower()} amount_contracts={amount_contracts} tdMode={td_mode} posSide={pos_side} tp_price_req={tp_price} sl_price_req={sl_price}")
         except Exception:
             pass
         tp_price = clamp(tp_price)
@@ -653,7 +678,8 @@ class ExchangeClient(ABC):
         else:
             return {'code': '0', 'data': []}
         try:
-            logging.info(f"OKX attach TP/SL body: ordType={body.get('ordType')} tp={body.get('tpTriggerPx')} sl={body.get('slTriggerPx')} posSide={body.get('posSide')} sz={body.get('sz')}")
+            logging.info(
+                f"OKX attach TP/SL body: ordType={body.get('ordType')} tp={body.get('tpTriggerPx')} sl={body.get('slTriggerPx')} posSide={body.get('posSide')} sz={body.get('sz')}")
         except Exception:
             pass
         raw = await self._okx_request('/api/v5/trade/order-algo', 'POST', body)
@@ -691,7 +717,8 @@ class ExchangeClient(ABC):
             pass
         raw = await self._okx_request('/api/v5/trade/cancel-algos', 'POST', body)
         try:
-            logging.info(f"OKX cancel algo orders result: code={str(raw.get('code')) if isinstance(raw, dict) else 'N/A'}")
+            logging.info(
+                f"OKX cancel algo orders result: code={str(raw.get('code')) if isinstance(raw, dict) else 'N/A'}")
         except Exception:
             pass
         return raw
@@ -701,7 +728,8 @@ class ExchangeClient(ABC):
             pending = await self._okx_list_algo_orders(symbol)
             targets: List[str] = []
             try:
-                logging.info(f"OKX cancel existing TP/SL: pending_count={len(pending)} side_close={str(side_close).lower() if side_close else None} pos_side={str(pos_side).lower() if pos_side else None}")
+                logging.info(
+                    f"OKX cancel existing TP/SL: pending_count={len(pending)} side_close={str(side_close).lower() if side_close else None} pos_side={str(pos_side).lower() if pos_side else None}")
             except Exception:
                 pass
             for o in pending:
@@ -710,14 +738,15 @@ class ExchangeClient(ABC):
                 ord_type = str(o.get('ordType', '')).lower()
                 algo_type = str(o.get('algoOrdType', '')).lower() if o.get('algoOrdType') else None
                 has_tp_sl = (
-                    (o.get('tpTriggerPx') is not None) or
-                    (o.get('slTriggerPx') is not None) or
-                    (ord_type in ('conditional', 'oco')) or
-                    (algo_type in ('tp', 'sl'))
+                        (o.get('tpTriggerPx') is not None) or
+                        (o.get('slTriggerPx') is not None) or
+                        (ord_type in ('conditional', 'oco')) or
+                        (algo_type in ('tp', 'sl'))
                 )
                 if not has_tp_sl:
                     continue
-                if (not side_close or side == side_close.lower()) and (pos_side is None or (ps and ps == pos_side.lower())):
+                if (not side_close or side == side_close.lower()) and (
+                        pos_side is None or (ps and ps == pos_side.lower())):
                     algo_id = o.get('algoId') or o.get('id')
                     if algo_id:
                         targets.append(str(algo_id))
@@ -731,7 +760,7 @@ class ExchangeClient(ABC):
                     logging.warning(f"OKX cancel existing TP/SL failed: {raw}")
         except Exception as e:
             logging.warning(f"OKX cancel existing TP/SL error: {e}")
-    
+
     async def _okx_update_tp_sl_if_exists(self, symbol: str, side_close: str, pos_side: Optional[str],
                                           margin_mode: str, amount_contracts: int,
                                           tp_price: Optional[float], sl_price: Optional[float]) -> bool:
@@ -746,10 +775,10 @@ class ExchangeClient(ABC):
                 ord_type = str(o.get('ordType', '')).lower()
                 algo_type = str(o.get('algoOrdType', '')).lower() if o.get('algoOrdType') else None
                 has_tp_sl = (
-                    (o.get('tpTriggerPx') is not None) or
-                    (o.get('slTriggerPx') is not None) or
-                    (ord_type in ('conditional', 'oco')) or
-                    (algo_type in ('tp', 'sl'))
+                        (o.get('tpTriggerPx') is not None) or
+                        (o.get('slTriggerPx') is not None) or
+                        (ord_type in ('conditional', 'oco')) or
+                        (algo_type in ('tp', 'sl'))
                 )
                 if not has_tp_sl:
                     continue
@@ -760,7 +789,8 @@ class ExchangeClient(ABC):
                 logging.info("OKX update TP/SL: no existing TP/SL algo orders found, skip updating")
                 return False
             await self._okx_cancel_existing_tp_sl(symbol, side_close, pos_side)
-            raw = await self._okx_attach_tp_sl(symbol, side_close, amount_contracts, margin_mode, pos_side, tp_price, sl_price)
+            raw = await self._okx_attach_tp_sl(symbol, side_close, amount_contracts, margin_mode, pos_side, tp_price,
+                                               sl_price)
             ok = str(raw.get('code')) == '0'
             if not ok:
                 logging.warning(f"OKX update TP/SL failed: {raw}")
@@ -779,24 +809,22 @@ class ExchangeClient(ABC):
         try:
             if not self._exchange:
                 raise ValueError("Exchange not initialized")
-                
+
             self._rate_limit()
             markets = await asyncio.to_thread(self._exchange.load_markets)
-            
+
             # Cache market info
             for symbol, market in markets.items():
                 market_info = MarketInfo.from_exchange_market(market)
                 if market_info:
                     self._market_cache[symbol] = market_info
                     self._market_cache_time[symbol] = time.time()
-                    
+
             logging.info(f"Loaded {len(self._market_cache)} markets")
-            
+
         except Exception as e:
             logging.error(f"Error loading markets: {e}")
             raise
-
-
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -807,7 +835,7 @@ class ExchangeClient(ABC):
             return float(value)
         except (TypeError, ValueError):
             return default
-    
+
     def _generate_client_order_id(self) -> str:
         """Generate a compliant client order id: [A-Za-z0-9], case-sensitive, max 32 chars"""
         alphabet = string.ascii_letters + string.digits
@@ -822,14 +850,14 @@ class ExchangeClient(ABC):
                 self._exchange.fetchPositions,
                 [norm] if norm else None
             )
-            
+
             result = []
             for pos in positions:
                 position_info = PositionInfo.from_exchange_position(pos)
                 if position_info:
                     result.append(position_info)
             return result
-            
+
         except Exception as e:
             logging.error(f"Error fetching positions: {e}")
             return []
@@ -852,17 +880,17 @@ class ExchangeClient(ABC):
             if norm in self._market_cache:
                 if now - self._market_cache_time.get(norm, 0) < self.CACHE_DURATION:
                     return self._market_cache[norm]
-            
+
             self._rate_limit()
             market = await asyncio.to_thread(self._exchange.market, norm)
             ticker = await asyncio.to_thread(self._exchange.fetchTicker, norm)
-            
+
             market_info = MarketInfo.from_exchange_market(market, ticker)
             if market_info:
                 self._market_cache[norm] = market_info
                 self._market_cache_time[norm] = now
             return market_info
-            
+
         except Exception as e:
             logging.error(f"Error getting market info: {e}")
             return None
@@ -874,17 +902,17 @@ class ExchangeClient(ABC):
             now = time.time()
             if self._balance_cache and now - self._balance_cache_time < self.CACHE_DURATION:
                 return self._balance_cache
-                
+
             # Fetch from exchange
             self._rate_limit()
             balance = await asyncio.to_thread(self._exchange.fetchBalance)
-            
+
             balance_info = AccountBalance.from_exchange_balance(balance)
             self._balance_cache = balance_info
             self._balance_cache_time = now
-            
+
             return balance_info
-            
+
         except Exception as e:
             logging.error(f"Error getting balance: {e}")
             return AccountBalance()
@@ -900,14 +928,14 @@ class ExchangeClient(ABC):
                 if now - self._position_cache_time.get(cache_key, 0) < self.CACHE_DURATION:
                     cached = self._position_cache[cache_key]
                     return cached if isinstance(cached, list) else [cached]
-                    
+
             # Fetch from exchange
             self._rate_limit()
             positions = await asyncio.to_thread(
                 self._exchange.fetchPositions,
                 [norm] if norm else None
             )
-            
+
             result = []
             for pos in positions:
                 if float(pos.get('contracts', 0)) != 0:  # Only include non-zero positions
@@ -917,17 +945,16 @@ class ExchangeClient(ABC):
                         key = position_info.symbol
                         self._position_cache[key] = position_info
                         self._position_cache_time[key] = now
-                        
+
             if not symbol:  # Cache all positions
                 self._position_cache['all'] = result
                 self._position_cache_time['all'] = now
-                
+
             return result
-            
+
         except Exception as e:
             logging.error(f"Error getting positions: {e}")
             return []
-
 
     async def cancel_order(self, order_id: str, symbol: str, cl_ord_id: Optional[str] = None) -> bool:
         """Cancel order"""
@@ -998,7 +1025,7 @@ class ExchangeClient(ABC):
             return None
 
     async def get_mark_price_history(self, symbol: str, timeframe: str = '1m',
-                                   limit: int = 100) -> List[Dict[str, Any]]:
+                                     limit: int = 100) -> List[Dict[str, Any]]:
         """Get mark price history"""
         try:
             self._rate_limit()
@@ -1009,10 +1036,10 @@ class ExchangeClient(ABC):
                 limit=limit,
                 params={'price': 'mark'}
             )
-            
+
             return [
                 {
-                    'timestamp': datetime.fromtimestamp(candle[0]/1000),
+                    'timestamp': datetime.fromtimestamp(candle[0] / 1000),
                     'open': float(candle[1]),
                     'high': float(candle[2]),
                     'low': float(candle[3]),
@@ -1025,7 +1052,6 @@ class ExchangeClient(ABC):
             logging.error(f"Error getting mark price history: {e}")
             return []
 
-
     async def get_market_leverage_info(self, symbol: str) -> Dict[str, Any]:
         """Get market leverage settings"""
         try:
@@ -1034,7 +1060,7 @@ class ExchangeClient(ABC):
                 self._exchange.fetchMarketLeverageTiers,  # 注意这里是fetchMarketLeverageTiers
                 symbol  # 不需要放在列表里
             )
-            
+
             if leverage_info and isinstance(leverage_info, list):
                 # 通常第一个tier是最大杠杆
                 max_leverage = int(leverage_info[0].get('maxLeverage', 1))
@@ -1043,7 +1069,7 @@ class ExchangeClient(ABC):
                     'tiers': leverage_info
                 }
             return {'max_leverage': 5, 'tiers': []}
-            
+
         except Exception as e:
             logging.error(f"Error getting leverage info: {e}")
             return {'max_leverage': 5, 'tiers': []}
@@ -1054,7 +1080,8 @@ class ExchangeClient(ABC):
             norm = self._normalize_symbol(symbol)
             if getattr(self, 'exchange_name', '') == 'OKX':
                 try:
-                    brackets = await getattr(self, 'get_leverage_brackets')(norm, margin_mode) if hasattr(self, 'get_leverage_brackets') else []
+                    brackets = await getattr(self, 'get_leverage_brackets')(norm, margin_mode) if hasattr(self,
+                                                                                                          'get_leverage_brackets') else []
                 except Exception:
                     brackets = []
                 max_lev = max(int(b.get('maxLeverage', 5)) for b in brackets) if brackets else leverage
@@ -1071,17 +1098,17 @@ class ExchangeClient(ABC):
                 await asyncio.to_thread(self._exchange.setLeverage, actual_leverage, norm)
                 logging.info(f"Set {margin_mode} leverage for {symbol}: requested={leverage}, actual={actual_leverage}")
                 return actual_leverage
-            
+
         except Exception as e:
             logging.error(f"Error setting leverage: {e}")
             raise  # 这种关键操作最好抛出异常而不是返回False
 
     async def convert_amount_to_contracts(
-        self, 
-        symbol: str, 
-        usdt_amount: float, 
-        price: float,
-        leverage: int
+            self,
+            symbol: str,
+            usdt_amount: float,
+            price: float,
+            leverage: int
     ) -> Tuple[float, Dict[str, Any]]:
         """Convert USDT amount to contracts quantity with leverage"""
         try:
@@ -1155,7 +1182,8 @@ class ExchangeClient(ABC):
                 raw_quantity = quantity
                 notional_value_calc = formatted_quantity * price
             if actual_value > usdt_amount:
-                logging.warning(f"Insufficient budget: initial margin {actual_value:.2f} exceeds {usdt_amount:.2f}; proceeding with minimum size")
+                logging.warning(
+                    f"Insufficient budget: initial margin {actual_value:.2f} exceeds {usdt_amount:.2f}; proceeding with minimum size")
 
             '''Amount Conversion Details:
                     USDT Amount: 180.0
@@ -1200,9 +1228,10 @@ class ExchangeClient(ABC):
                 logging.warning(f"Limit order missing price for {order.symbol}, switching to MARKET")
                 order.order_type = OrderType.MARKET
             if not order.validate():
-                logging.error(f"Order validation failed: symbol={order.symbol}, side={order.side}, type={order.order_type}, amount={order.amount}, price={order.price}, stop_price={order.stop_price}, reduce_only={order.reduce_only}")
+                logging.error(
+                    f"Order validation failed: symbol={order.symbol}, side={order.side}, type={order.order_type}, amount={order.amount}, price={order.price}, stop_price={order.stop_price}, reduce_only={order.reduce_only}")
                 raise OrderException("Invalid order parameters")
-                
+
             ccxt_symbol = self._normalize_symbol(order.symbol)
             market_info = await self.get_market_info(ccxt_symbol)
             if not market_info or not market_info.last_price:
@@ -1215,13 +1244,15 @@ class ExchangeClient(ABC):
                     use_price = self._format_price(ccxt_symbol, float(order.price))
                 except Exception:
                     use_price = market_info.last_price
-            
+
             # 设置杠杆和保证金模式
             leverage = order.leverage or 3  # 默认3倍杠杆
             actual_leverage = await self.set_leverage(ccxt_symbol, leverage, order.margin_mode)
-            logging.warning(f"Set leverage to {actual_leverage}x for {order.symbol}  leverage: {leverage} margin_mode: {order.margin_mode}")
+            logging.warning(
+                f"Set leverage to {actual_leverage}x for {order.symbol}  leverage: {leverage} margin_mode: {order.margin_mode}")
             logging.warning(f"ccxt_symbol: {ccxt_symbol} use_price: {use_price} order.amount： {order.amount}")
-            logging.warning(f"order.reduce_only: {order.reduce_only} order.extra_params: {order.extra_params} order: {order}")
+            logging.warning(
+                f"order.reduce_only: {order.reduce_only} order.extra_params: {order.extra_params} order: {order}")
             use_raw_amount = bool(order.reduce_only)
             if use_raw_amount:
                 is_contract = (market_info.amount_precision == 0)
@@ -1271,13 +1302,15 @@ class ExchangeClient(ABC):
                 price_arg = self._format_price(ccxt_symbol, order.price)
                 if getattr(self, 'exchange_name', '') == 'OKX':
                     limits = await self._okx_get_price_limit(ccxt_symbol)
-                    if limits and side_arg == 'buy' and limits.get('max_buy') is not None and price_arg > limits['max_buy']:
+                    if limits and side_arg == 'buy' and limits.get('max_buy') is not None and price_arg > limits[
+                        'max_buy']:
                         logging.warning(f"Limit price {price_arg} exceeds max buy {limits['max_buy']}, clamping")
                         price_arg = limits['max_buy']
-                    if limits and side_arg == 'sell' and limits.get('min_sell') is not None and price_arg < limits['min_sell']:
+                    if limits and side_arg == 'sell' and limits.get('min_sell') is not None and price_arg < limits[
+                        'min_sell']:
                         logging.warning(f"Limit price {price_arg} below min sell {limits['min_sell']}, clamping")
                         price_arg = limits['min_sell']
-            
+
             if order.stop_price:
                 params_extras['stopPrice'] = self._format_price(ccxt_symbol, order.stop_price)
             if order.reduce_only:
@@ -1285,7 +1318,9 @@ class ExchangeClient(ABC):
             # 交易所特定参数（OKX）
             if getattr(self, 'exchange_name', '') == 'OKX':
                 try:
-                    if not order.cl_ord_id or not isinstance(order.cl_ord_id, str) or not order.cl_ord_id.isalnum() or len(order.cl_ord_id) > 32:
+                    if not order.cl_ord_id or not isinstance(order.cl_ord_id,
+                                                             str) or not order.cl_ord_id.isalnum() or len(
+                            order.cl_ord_id) > 32:
                         order.cl_ord_id = self._generate_client_order_id()
                 except Exception:
                     order.cl_ord_id = self._generate_client_order_id()
@@ -1295,7 +1330,8 @@ class ExchangeClient(ABC):
                 # Prefer inline TP/SL when provided in order params
                 try:
                     tp_px = order.extra_params.get('tpTriggerPx') or order.extra_params.get('takeProfitPrice')
-                    sl_px = order.extra_params.get('slTriggerPx') or order.extra_params.get('stopLossPrice') or order.stop_price
+                    sl_px = order.extra_params.get('slTriggerPx') or order.extra_params.get(
+                        'stopLossPrice') or order.stop_price
                     if tp_px is not None:
                         params_extras['tpTriggerPx'] = self._format_price(ccxt_symbol, float(tp_px))
                     if sl_px is not None:
@@ -1368,7 +1404,8 @@ class ExchangeClient(ABC):
                             raw = raw2
                         else:
                             pe['posSide'] = 'net'
-                            raw3 = await self._okx_create_order(symbol_arg, type_arg, side_arg, amount_arg, price_arg, pe)
+                            raw3 = await self._okx_create_order(symbol_arg, type_arg, side_arg, amount_arg, price_arg,
+                                                                pe)
                             if str(raw3.get('code')) == '0':
                                 data_list = raw3.get('data') or []
                                 result = data_list[0] if data_list else {}
@@ -1387,7 +1424,8 @@ class ExchangeClient(ABC):
                         else:
                             # 再尝试使用 net（仅当端点接受）
                             pe['posSide'] = 'net'
-                            raw3 = await self._okx_create_order(symbol_arg, type_arg, side_arg, amount_arg, price_arg, pe)
+                            raw3 = await self._okx_create_order(symbol_arg, type_arg, side_arg, amount_arg, price_arg,
+                                                                pe)
                             if str(raw3.get('code')) == '0':
                                 data_list = raw3.get('data') or []
                                 result = data_list[0] if data_list else {}
@@ -1451,7 +1489,8 @@ class ExchangeClient(ABC):
             # Contracts size must be integer
             amount_contracts = max(1, int(math.floor(executed_amount)))
             norm = self._normalize_symbol(symbol)
-            raw = await self._okx_attach_tp_sl(norm, side_close, amount_contracts, margin_mode, pos_side, take_profit, stop_loss)
+            raw = await self._okx_attach_tp_sl(norm, side_close, amount_contracts, margin_mode, pos_side, take_profit,
+                                               stop_loss)
             ok = str(raw.get('code')) == '0'
             if not ok:
                 logging.warning(f"OKX attach TP/SL failed: {raw}")
@@ -1460,18 +1499,16 @@ class ExchangeClient(ABC):
             logging.error(f"Error attaching TP/SL: {e}")
             return False
 
-
     def _format_price(self, symbol: str, price: float) -> float:
         """Format price according to symbol precision"""
         try:
-            #TODO - market price
+            # TODO - market price
             # market_info = self._market_cache.get(symbol)
             # if market_info:
             #     precision = market_info.price_precision
             #     logging.info(f"format_price----price_precision---{market_info.price_precision}--{float(format(price, f'.{precision}f'))}---original--price{price}")
             #     return float(format(price, f'.{precision}f'))
-            
-            
+
             logging.info(f"format_priceoriginal--price{price}")
             return float(price)
         except Exception as e:
@@ -1493,9 +1530,10 @@ class ExchangeClient(ABC):
             logging.error(f"Error formatting amount: {e}")
             return amount
 
+
 class BinanceClient(ExchangeClient):
     """Binance exchange client implementation"""
-    
+
     def __init__(self, credentials: ExchangeCredentials):
         super().__init__(credentials)
         self.min_request_interval = 0.05
@@ -1553,7 +1591,7 @@ class BinanceClient(ExchangeClient):
             logging.info("Binance connection test successful")
 
             return True
-            
+
         except Exception as e:
             logging.error(f"Error setting up Binance exchange: {e}")
             import traceback
@@ -1582,7 +1620,7 @@ class BinanceClient(ExchangeClient):
         except Exception as e:
             logging.error(f"Error loading Binance markets: {e}")
             raise
-        
+
     async def get_leverage_brackets(self, symbol: str) -> List[Dict[str, Any]]:
         """Get leverage brackets"""
         try:
@@ -1591,7 +1629,7 @@ class BinanceClient(ExchangeClient):
                 self._exchange.fapiPrivateGetLeverageBracket,
                 {'symbol': symbol}
             )
-            
+
             if response and isinstance(response, list):
                 return [
                     {
@@ -1625,9 +1663,10 @@ class BinanceClient(ExchangeClient):
             logging.error(f"Error transferring margin: {e}")
             return False
 
+
 class OKXClient(ExchangeClient):
     """OKX exchange client implementation"""
-    
+
     def __init__(self, credentials: ExchangeCredentials):
         super().__init__(credentials)
         self.min_request_interval = 0.02
@@ -1648,18 +1687,18 @@ class OKXClient(ExchangeClient):
                     'adjustForTimeDifference': True
                 }
             }
-            
+
             if self.credentials.testnet:
                 config['hostname'] = 'okx.com'  # Use main domain for testnet
                 config['options']['testnet'] = True
 
             self._exchange = ccxt.okx(config)
-            
+
             # Test connection
             logging.info("Testing OKX connection...")
             await asyncio.to_thread(self._exchange.fetch_balance)
             logging.info("OKX connection test successful")
-            
+
             # Load markets
             logging.info("Loading OKX markets...")
             await self._load_markets()
@@ -1679,13 +1718,13 @@ class OKXClient(ExchangeClient):
                 logging.warning(f"Unable to fetch OKX position mode: {e}")
 
             return True
-            
+
         except Exception as e:
             logging.error(f"Error setting up OKX exchange: {e}")
             import traceback
             logging.error(f"Traceback:\n{traceback.format_exc()}")
             return False
-        
+
     async def get_leverage_brackets(self, symbol: str, margin_mode: str = 'cross') -> List[Dict[str, Any]]:
         """Get leverage brackets for OKX instrument
         Accepts ccxt symbol (e.g., BTC/USDT:USDT) and resolves to instId (e.g., BTC-USDT-SWAP).
@@ -1724,7 +1763,8 @@ class OKXClient(ExchangeClient):
                             inst_type = 'FUTURES'
                         else:
                             inst_type = 'SWAP'
-                    raw2 = await self._okx_request('/api/v5/public/instruments', 'GET', None, {'instType': inst_type, 'instId': inst_id})
+                    raw2 = await self._okx_request('/api/v5/public/instruments', 'GET', None,
+                                                   {'instType': inst_type, 'instId': inst_id})
                     if raw2 and str(raw2.get('code')) == '0':
                         d2 = (raw2.get('data') or [{}])[0]
                         candidates = []
@@ -1757,9 +1797,10 @@ class OKXClient(ExchangeClient):
             logging.error(f"Error getting leverage brackets: {e}")
             return []
 
+
 class ExchangeManager:
     """Exchange manager for multiple exchanges"""
-    
+
     def __init__(self, config):
         self.config = config
         self.exchanges: Dict[str, ExchangeClient] = {}
@@ -1767,7 +1808,7 @@ class ExchangeManager:
         self._monitoring = False
         self.monitor_interval = 1  # seconds
         self.on_execute_success: Optional[Callable[[TradingSignal, OrderResult], Awaitable[None]]] = None
-        
+
         # Cache
         self._position_cache: Dict[str, Dict[str, PositionInfo]] = {}
         self._position_cache_time: Dict[str, float] = {}
@@ -1829,7 +1870,7 @@ class ExchangeManager:
                         logging.warning("USE_TESTNET is false but BINANCE_API_KEY not set; skipping Binance")
             except Exception as e:
                 logging.error(f"Error initializing Binance: {e}")
-            
+
             # Initialize OKX according to USE_TESTNET and available keys
             try:
                 okx_cfg = self.config.get_exchange_config('OKX')
@@ -1864,13 +1905,13 @@ class ExchangeManager:
 
             logging.info(f"Exchange initialization complete. Active exchanges: {list(self.exchanges.keys())}")
             return True
-            
+
         except Exception as e:
             logging.error(f"Error in exchange initialization: {e}")
             import traceback
             logging.error(f"Traceback:\n{traceback.format_exc()}")
             return False
-        
+
     async def cleanup(self):
         """Cleanup all exchanges"""
         for exchange in self.exchanges.values():
@@ -1887,7 +1928,8 @@ class ExchangeManager:
                     success=False,
                     error_message=f"Exchange {signal.exchange} not configured"
                 )
-            logging.info(f"ExecuteSignal start: exchange={signal.exchange} symbol={signal.symbol} action={signal.action} order_type={signal.order_type} entry_price={signal.entry_price} position_size={signal.position_size} leverage={signal.leverage} margin_mode={signal.margin_mode} tp_levels_count={len(signal.take_profit_levels or [])} stop_loss={signal.stop_loss}")
+            logging.info(
+                f"ExecuteSignal start: exchange={signal.exchange} symbol={signal.symbol} action={signal.action} order_type={signal.order_type} entry_price={signal.entry_price} position_size={signal.position_size} leverage={signal.leverage} margin_mode={signal.margin_mode} tp_levels_count={len(signal.take_profit_levels or [])} stop_loss={signal.stop_loss}")
 
             # Handle CLOSE: only reduce existing position, do not create new entry orders
             if signal.action == 'CLOSE':
@@ -1906,13 +1948,15 @@ class ExchangeManager:
                         open_orders = []
                     for oi in open_orders or []:
                         try:
-                            logging.info(f"ExecuteSignal CLOSE: cancel order id={oi.id} symbol={oi.symbol} clOrdId={getattr(oi, 'cl_ord_id', None)}")
+                            logging.info(
+                                f"ExecuteSignal CLOSE: cancel order id={oi.id} symbol={oi.symbol} clOrdId={getattr(oi, 'cl_ord_id', None)}")
                             await exchange.cancel_order(oi.id, oi.symbol, getattr(oi, 'cl_ord_id', None))
                         except Exception:
                             pass
                     close_ratio = 1.0
                     if signal.take_profit_levels:
-                        ratio_sum = sum([tp.percentage for tp in signal.take_profit_levels if tp and tp.percentage is not None])
+                        ratio_sum = sum(
+                            [tp.percentage for tp in signal.take_profit_levels if tp and tp.percentage is not None])
                         if ratio_sum > 0:
                             if ratio_sum > 1.0 and ratio_sum <= 100.0:
                                 ratio_sum = ratio_sum / 100.0
@@ -1921,9 +1965,11 @@ class ExchangeManager:
                     results: List[OrderResult] = []
                     for position in positions:
                         close_amount = position.size * close_ratio
-                        logging.info(f"ExecuteSignal CLOSE: closing position symbol={signal.symbol} side={'SELL' if position.side == PositionSide.LONG else 'BUY'} size={position.size} close_amount={close_amount} leverage={position.leverage} margin_mode={position.margin_mode}")
+                        logging.info(
+                            f"ExecuteSignal CLOSE: closing position symbol={signal.symbol} side={'SELL' if position.side == PositionSide.LONG else 'BUY'} size={position.size} close_amount={close_amount} leverage={position.leverage} margin_mode={position.margin_mode}")
                         if close_amount <= 0:
-                            logging.warning(f"ExecuteSignal CLOSE: skip position with non-positive close_amount={close_amount}")
+                            logging.warning(
+                                f"ExecuteSignal CLOSE: skip position with non-positive close_amount={close_amount}")
                             continue
                         order = OrderParams(
                             symbol=signal.symbol,
@@ -1932,7 +1978,8 @@ class ExchangeManager:
                             amount=close_amount,
                             reduce_only=True,
                             leverage=position.leverage,
-                            margin_mode=position.margin_mode.value if hasattr(position.margin_mode, 'value') else str(position.margin_mode),
+                            margin_mode=position.margin_mode.value if hasattr(position.margin_mode, 'value') else str(
+                                position.margin_mode),
                             extra_params={
                                 'posSide': 'long' if position.side == PositionSide.LONG else 'short'
                             }
@@ -1943,7 +1990,8 @@ class ExchangeManager:
                     logging.info(f"ExecuteSignal CLOSE: results_count={len(results)} all_ok={all_ok}")
                     if not all_ok:
                         msg = "; ".join([r.error_message or "" for r in results if not r.success]) or "Close failed"
-                        return OrderResult(success=False, error_message=msg, extra_info={'orders': [r.to_dict() for r in results]})
+                        return OrderResult(success=False, error_message=msg,
+                                           extra_info={'orders': [r.to_dict() for r in results]})
                     first = results[0]
                     final = OrderResult(
                         success=True,
@@ -1969,7 +2017,8 @@ class ExchangeManager:
                     # 撤销所有未成交的限价单
                     for oi in open_orders:
                         if oi.type.lower() == 'limit':
-                            logging.info(f"ExecuteSignal CANCEL: cancel limit order id={oi.id} symbol={oi.symbol} price={oi.price} amount={oi.amount}")
+                            logging.info(
+                                f"ExecuteSignal CANCEL: cancel limit order id={oi.id} symbol={oi.symbol} price={oi.price} amount={oi.amount}")
                             await exchange.cancel_order(oi.id, oi.symbol, getattr(oi, 'cl_ord_id', None))
                     final = OrderResult(success=True)
                     await self._notify_execute_success(signal, final)
@@ -1977,7 +2026,7 @@ class ExchangeManager:
                 except Exception as e:
                     logging.error(f"Error handling CANCEL action: {e}")
                     return OrderResult(success=False, error_message=str(e))
-            #TURNOVER reverse the order side，close current orders and create a new order with opposite side
+            # TURNOVER reverse the order side，close current orders and create a new order with opposite side
             elif signal.action == 'TURNOVER':
                 try:
                     logging.info(f"ExecuteSignal TURNOVER: fetching positions for {signal.symbol}")
@@ -1999,7 +2048,8 @@ class ExchangeManager:
                             pass
                     results_close: List[OrderResult] = []
                     for position in positions:
-                        logging.info(f"ExecuteSignal TURNOVER: closing position symbol={signal.symbol} size={position.size} side={'SELL' if position.side == PositionSide.LONG else 'BUY'}")
+                        logging.info(
+                            f"ExecuteSignal TURNOVER: closing position symbol={signal.symbol} size={position.size} side={'SELL' if position.side == PositionSide.LONG else 'BUY'}")
                         order_close = OrderParams(
                             symbol=signal.symbol,
                             side=OrderSide.SELL if position.side == PositionSide.LONG else OrderSide.BUY,
@@ -2007,7 +2057,8 @@ class ExchangeManager:
                             amount=position.size,
                             reduce_only=True,
                             leverage=position.leverage,
-                            margin_mode=position.margin_mode.value if hasattr(position.margin_mode, 'value') else str(position.margin_mode),
+                            margin_mode=position.margin_mode.value if hasattr(position.margin_mode, 'value') else str(
+                                position.margin_mode),
                             extra_params={
                                 'posSide': 'long' if position.side == PositionSide.LONG else 'short'
                             }
@@ -2018,19 +2069,23 @@ class ExchangeManager:
                     long_total = sum([p.size for p in positions if p.side == PositionSide.LONG])
                     short_total = sum([p.size for p in positions if p.side == PositionSide.SHORT])
                     side_open = OrderSide.SELL if long_total >= short_total else OrderSide.BUY
-                    margin_mode_use = signal.margin_mode or (positions[0].margin_mode.value if hasattr(positions[0].margin_mode, 'value') else str(positions[0].margin_mode))
+                    margin_mode_use = signal.margin_mode or (
+                        positions[0].margin_mode.value if hasattr(positions[0].margin_mode, 'value') else str(
+                            positions[0].margin_mode))
                     leverage_use = signal.leverage or (positions[0].leverage if positions else 3)
                     amount_usdt = signal.position_size if (signal.position_size and signal.position_size > 0) else None
                     if amount_usdt is None:
                         market_info = await exchange.get_market_info(signal.symbol)
                         if market_info and market_info.last_price:
                             ct = float(market_info.contract_size or 1.0)
-                            net_size = abs(long_total - short_total) if (long_total and short_total) else (positions[0].size if positions else 1.0)
+                            net_size = abs(long_total - short_total) if (long_total and short_total) else (
+                                positions[0].size if positions else 1.0)
                             notional = net_size * market_info.last_price * ct
                             amount_usdt = max(1.0, notional / max(1, leverage_use))
                         else:
                             amount_usdt = 50.0
-                    logging.info(f"ExecuteSignal TURNOVER: long_total={long_total} short_total={short_total} side_open={side_open} leverage_use={leverage_use} margin_mode_use={margin_mode_use} amount_usdt={amount_usdt}")
+                    logging.info(
+                        f"ExecuteSignal TURNOVER: long_total={long_total} short_total={short_total} side_open={side_open} leverage_use={leverage_use} margin_mode_use={margin_mode_use} amount_usdt={amount_usdt}")
                     tp_price_sig = None
                     if signal.take_profit_levels:
                         try:
@@ -2053,18 +2108,24 @@ class ExchangeManager:
                             'slTriggerPx': sl_price_sig if sl_price_sig else None,
                         }
                     )
-                    logging.info(f"ExecuteSignal TURNOVER: create order side={order_open.side} type={order_open.order_type} amount={order_open.amount} leverage={order_open.leverage} margin_mode={order_open.margin_mode}")
+                    logging.info(
+                        f"ExecuteSignal TURNOVER: create order side={order_open.side} type={order_open.order_type} amount={order_open.amount} leverage={order_open.leverage} margin_mode={order_open.margin_mode}")
                     res_open = await exchange.create_order(order_open)
-                    logging.info(f"ExecuteSignal TURNOVER: create result success={res_open.success} order_id={res_open.order_id} executed_price={res_open.executed_price} executed_amount={res_open.executed_amount}")
+                    logging.info(
+                        f"ExecuteSignal TURNOVER: create result success={res_open.success} order_id={res_open.order_id} executed_price={res_open.executed_price} executed_amount={res_open.executed_amount}")
                     if not all_closed:
-                        msg = "; ".join([r.error_message or "" for r in results_close if not r.success]) or "Close failed during turnover"
-                        return OrderResult(success=False, error_message=msg, extra_info={'closed_orders': [r.to_dict() for r in results_close], 'open_order': res_open.to_dict() if res_open else None})
+                        msg = "; ".join([r.error_message or "" for r in results_close if
+                                         not r.success]) or "Close failed during turnover"
+                        return OrderResult(success=False, error_message=msg,
+                                           extra_info={'closed_orders': [r.to_dict() for r in results_close],
+                                                       'open_order': res_open.to_dict() if res_open else None})
                     final = OrderResult(
                         success=res_open.success,
                         order_id=res_open.order_id,
                         executed_price=res_open.executed_price,
                         executed_amount=res_open.executed_amount,
-                        extra_info={'closed_orders': [r.to_dict() for r in results_close], 'open_order': res_open.to_dict() if res_open else None}
+                        extra_info={'closed_orders': [r.to_dict() for r in results_close],
+                                    'open_order': res_open.to_dict() if res_open else None}
                     )
                     if final.success:
                         await self._notify_execute_success(signal, final)
@@ -2089,21 +2150,44 @@ class ExchangeManager:
                         except Exception:
                             tp_px = None
                     sl_px = signal.stop_loss if signal.stop_loss and signal.stop_loss > 0 else None
-                    logging.info(f"ExecuteSignal UPDATE: target tp_px={tp_px} sl_px={sl_px} entry_price={signal.entry_price}")
+                    logging.info(
+                        f"ExecuteSignal UPDATE: target tp_px={tp_px} sl_px={sl_px} entry_price={signal.entry_price}")
                     for oi in open_orders:
                         if not oi or oi.type.lower() != 'limit':
                             continue
-                        logging.info(f"ExecuteSignal UPDATE: existing order oi={oi} id={oi.id} clOrdId={getattr(oi, 'cl_ord_id', None)} price={oi.price} tp={getattr(oi, 'tp_trigger_px', None)} sl={getattr(oi, 'sl_trigger_px', None)}")
+                        logging.info(
+                            f"ExecuteSignal UPDATE: existing order oi={oi} id={oi.id} clOrdId={getattr(oi, 'cl_ord_id', None)} price={oi.price} tp={getattr(oi, 'tp_trigger_px', None)} sl={getattr(oi, 'sl_trigger_px', None)}")
                         filled_amt = getattr(oi, 'filled', None)
                         status = str(getattr(oi, 'status', '') or '').lower()
-                        is_unfilled = (filled_amt is None or float(filled_amt) <= 0.0) and status in ('', 'open', 'new', 'pending')
+                        is_unfilled = (filled_amt is None or float(filled_amt) <= 0.0) and status in ('', 'open', 'new',
+                                                                                                      'pending')
                         if is_unfilled:
                             try:
-                                logging.info(f"ExecuteSignal UPDATE: cancel and recreate order id={oi.id} symbol={oi.symbol}")
+                                logging.info(
+                                    f"ExecuteSignal UPDATE: cancel and recreate order id={oi.id} symbol={oi.symbol}")
                                 await exchange.cancel_order(oi.id, oi.symbol, getattr(oi, 'cl_ord_id', None))
                                 price_use = signal.entry_price if signal.entry_price else oi.price
                                 leverage_use = signal.leverage or 10
-                                usdt_amount = max(1.0, (oi.amount * (price_use or 0.0)) / max(1, leverage_use))
+                                usdt_amount = None
+                                try:
+                                    market_info = await exchange.get_market_info(oi.symbol)
+                                    if market_info and market_info.amount_precision == 0:
+                                        ct = float(market_info.contract_size or 0.0)
+                                        if ct <= 0:
+                                            try:
+                                                mkt = await asyncio.to_thread(exchange._exchange.market,
+                                                                              exchange._normalize_symbol(oi.symbol))
+                                                info = mkt.get('info', {})
+                                                ct = float(info.get('ctVal') or 1.0)
+                                            except Exception:
+                                                ct = 1.0
+                                        notional = oi.amount * (price_use or 0.0) * ct
+                                        usdt_amount = notional / max(1, leverage_use)
+                                except Exception:
+                                    usdt_amount = None
+                                if usdt_amount is None:
+                                    usdt_amount = (oi.amount * (price_use or 0.0)) / max(1, leverage_use)
+                                usdt_amount = max(1.0, usdt_amount)
                                 order = OrderParams(
                                     symbol=oi.symbol,
                                     side=oi.side,
@@ -2122,7 +2206,8 @@ class ExchangeManager:
                             except Exception as e:
                                 logging.warning(f"Recreate order failed: {e}")
                         else:
-                            logging.info(f"ExecuteSignal UPDATE: skip price change for partially filled/active order id={oi.id}, will only update TP/SL if exists")
+                            logging.info(
+                                f"ExecuteSignal UPDATE: skip price change for partially filled/active order id={oi.id}, will only update TP/SL if exists")
                     if recreated_any:
                         logging.info("ExecuteSignal UPDATE: open orders recreated successfully (no TP/SL changes)")
                         final = OrderResult(success=True)
@@ -2142,7 +2227,8 @@ class ExchangeManager:
                                     exchange._normalize_symbol(signal.symbol),
                                     side_close,
                                     pos_side if getattr(exchange, 'pos_mode', None) == 'long_short' else None,
-                                    pos.margin_mode.value if hasattr(pos.margin_mode, 'value') else str(pos.margin_mode),
+                                    pos.margin_mode.value if hasattr(pos.margin_mode, 'value') else str(
+                                        pos.margin_mode),
                                     amount_contracts,
                                     tp_px,
                                     sl_px
@@ -2163,11 +2249,11 @@ class ExchangeManager:
                     return OrderResult(success=False, error_message=str(e))
             # action OPEN_LONG or OPEN_SHORT
             else:
-                if signal.entry_zones: # potential entry zones
+                if signal.entry_zones:  # potential entry zones
                     results = []
                     total_amount = signal.position_size
 
-                    for index,zone in enumerate(signal.entry_zones):
+                    for index, zone in enumerate(signal.entry_zones):
                         # Calculate USDT amount for this zone
                         zone_amount = total_amount * zone.percentage
 
@@ -2177,7 +2263,8 @@ class ExchangeManager:
                             Percentage: {zone.percentage}
                             USDT Amount: {zone_amount}
                             """)
-                        logging.info(f"ExecuteSignal ENTRY_ZONES: preparing order side={'BUY' if signal.action == 'OPEN_LONG' else 'SELL'} amount={zone_amount} price={zone.price} leverage={signal.leverage} margin_mode={signal.margin_mode}")
+                        logging.info(
+                            f"ExecuteSignal ENTRY_ZONES: preparing order side={'BUY' if signal.action == 'OPEN_LONG' else 'SELL'} amount={zone_amount} price={zone.price} leverage={signal.leverage} margin_mode={signal.margin_mode}")
 
                         # Prepare TP/SL
                         tp_price_sig = None
@@ -2203,9 +2290,11 @@ class ExchangeManager:
                             }
                         )
 
-                        logging.info(f"ExecuteSignal ENTRY_ZONES: create order side={order.side} type={order.order_type} amount={order.amount} price={order.price} leverage={order.leverage} margin_mode={order.margin_mode} tp={tp_price_sig} sl={sl_price_sig}")
+                        logging.info(
+                            f"ExecuteSignal ENTRY_ZONES: create order side={order.side} type={order.order_type} amount={order.amount} price={order.price} leverage={order.leverage} margin_mode={order.margin_mode} tp={tp_price_sig} sl={sl_price_sig}")
                         result = await exchange.create_order(order)
-                        logging.info(f"ExecuteSignal ENTRY_ZONES: order result success={result.success} order_id={result.order_id} executed_price={result.executed_price} executed_amount={result.executed_amount}")
+                        logging.info(
+                            f"ExecuteSignal ENTRY_ZONES: order result success={result.success} order_id={result.order_id} executed_price={result.executed_price} executed_amount={result.executed_amount}")
                         results.append(result)
 
                         if result.success:
@@ -2217,13 +2306,16 @@ class ExchangeManager:
                             sl_price = signal.stop_loss
                             try:
                                 if order.extra_params:
-                                    tp_price = order.extra_params.get('tpTriggerPx') or order.extra_params.get('takeProfitPrice') or tp_price
-                                    sl_price = order.extra_params.get('slTriggerPx') or order.extra_params.get('stopLossPrice') or sl_price
+                                    tp_price = order.extra_params.get('tpTriggerPx') or order.extra_params.get(
+                                        'takeProfitPrice') or tp_price
+                                    sl_price = order.extra_params.get('slTriggerPx') or order.extra_params.get(
+                                        'stopLossPrice') or sl_price
                             except Exception:
                                 pass
                             # Attach TP/SL only after position exists
                             try:
-                                inline_set = bool(order.extra_params.get('tpTriggerPx') or order.extra_params.get('slTriggerPx'))
+                                inline_set = bool(
+                                    order.extra_params.get('tpTriggerPx') or order.extra_params.get('slTriggerPx'))
                                 if getattr(exchange, 'exchange_name', '') == 'OKX' and inline_set:
                                     logging.info("Skip attach_tp_sl: TP/SL attached via attachAlgoOrds")
                                 else:
@@ -2234,7 +2326,8 @@ class ExchangeManager:
                                             signal.symbol,
                                             OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
                                             pos.size,
-                                            pos.margin_mode.value if hasattr(pos.margin_mode, 'value') else str(pos.margin_mode),
+                                            pos.margin_mode.value if hasattr(pos.margin_mode, 'value') else str(
+                                                pos.margin_mode),
                                             tp_price,
                                             sl_price
                                         )
@@ -2243,7 +2336,8 @@ class ExchangeManager:
                                         else:
                                             logging.warning("Failed to attach TP/SL for zone order")
                                     else:
-                                        logging.info("Skipped TP/SL attach: no open position yet (inline TP/SL applied if supported)")
+                                        logging.info(
+                                            "Skipped TP/SL attach: no open position yet (inline TP/SL applied if supported)")
                             except Exception as e:
                                 logging.error(f"Error attaching TP/SL: {e}")
                         else:
@@ -2274,7 +2368,8 @@ class ExchangeManager:
                     price = signal.entry_price
                     if str(signal.order_type).upper() == "MARKET":
                         price = None
-                    logging.info(f"ExecuteSignal SINGLE_ENTRY: preparing order side={'BUY' if signal.action == 'OPEN_LONG' else 'SELL'} type={'MARKET' if str(signal.order_type).upper() == 'MARKET' else 'LIMIT'} amount={signal.position_size} price={price} leverage={signal.leverage} margin_mode={signal.margin_mode} tp={tp_price_sig} sl={sl_price_sig}")
+                    logging.info(
+                        f"ExecuteSignal SINGLE_ENTRY: preparing order side={'BUY' if signal.action == 'OPEN_LONG' else 'SELL'} type={'MARKET' if str(signal.order_type).upper() == 'MARKET' else 'LIMIT'} amount={signal.position_size} price={price} leverage={signal.leverage} margin_mode={signal.margin_mode} tp={tp_price_sig} sl={sl_price_sig}")
                     order = OrderParams(
                         symbol=signal.symbol,
                         side=OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
@@ -2290,7 +2385,8 @@ class ExchangeManager:
                     )
 
                     result = await exchange.create_order(order)
-                    logging.info(f"ExecuteSignal SINGLE_ENTRY: order result success={result.success} order_id={result.order_id} executed_price={result.executed_price} executed_amount={result.executed_amount}")
+                    logging.info(
+                        f"ExecuteSignal SINGLE_ENTRY: order result success={result.success} order_id={result.order_id} executed_price={result.executed_price} executed_amount={result.executed_amount}")
                     if result.success:
                         tp_price = None
                         if signal.take_profit_levels:
@@ -2299,25 +2395,30 @@ class ExchangeManager:
                         sl_price = signal.stop_loss
                         try:
                             if order.extra_params:
-                                tp_price = order.extra_params.get('tpTriggerPx') or order.extra_params.get('takeProfitPrice') or tp_price
-                                sl_price = order.extra_params.get('slTriggerPx') or order.extra_params.get('stopLossPrice') or sl_price
+                                tp_price = order.extra_params.get('tpTriggerPx') or order.extra_params.get(
+                                    'takeProfitPrice') or tp_price
+                                sl_price = order.extra_params.get('slTriggerPx') or order.extra_params.get(
+                                    'stopLossPrice') or sl_price
                         except Exception:
                             pass
                         # Attach TP/SL only after position exists
                         try:
-                            inline_set = bool(order.extra_params.get('tpTriggerPx') or order.extra_params.get('slTriggerPx'))
+                            inline_set = bool(
+                                order.extra_params.get('tpTriggerPx') or order.extra_params.get('slTriggerPx'))
                             if getattr(exchange, 'exchange_name', '') == 'OKX' and inline_set:
                                 logging.info("Skip attach_tp_sl: TP/SL attached via attachAlgoOrds")
                             else:
                                 positions = await exchange.get_positions(signal.symbol)
                                 if positions:
                                     pos = positions[0]
-                                    logging.info(f"ExecuteSignal SINGLE_ENTRY: attach TP/SL after position size={pos.size} tp={tp_price} sl={sl_price} margin_mode={pos.margin_mode}")
+                                    logging.info(
+                                        f"ExecuteSignal SINGLE_ENTRY: attach TP/SL after position size={pos.size} tp={tp_price} sl={sl_price} margin_mode={pos.margin_mode}")
                                     attached = await exchange.attach_tp_sl(
                                         signal.symbol,
                                         OrderSide.BUY if signal.action == 'OPEN_LONG' else OrderSide.SELL,
                                         pos.size,
-                                        pos.margin_mode.value if hasattr(pos.margin_mode, 'value') else str(pos.margin_mode),
+                                        pos.margin_mode.value if hasattr(pos.margin_mode, 'value') else str(
+                                            pos.margin_mode),
                                         tp_price,
                                         sl_price
                                     )
@@ -2326,7 +2427,8 @@ class ExchangeManager:
                                     else:
                                         logging.warning("Failed to attach TP/SL for entry order")
                                 else:
-                                    logging.info("Skipped TP/SL attach: no open position yet (inline TP/SL applied if supported)")
+                                    logging.info(
+                                        "Skipped TP/SL attach: no open position yet (inline TP/SL applied if supported)")
                         except Exception as e:
                             logging.error(f"Error attaching TP/SL: {e}")
                     if result.success:
@@ -2338,7 +2440,7 @@ class ExchangeManager:
             import traceback
             logging.error(f"Traceback:\n{traceback.format_exc()}")
             return OrderResult(success=False, error_message=str(e))
-        
+
     async def _check_take_profit_levels(self, exchange_name: str, symbol: str, position: PositionInfo) -> None:
         """Check and execute take profit orders"""
         try:
@@ -2366,12 +2468,12 @@ class ExchangeManager:
 
                 # Check if TP is hit
                 is_hit = (signal.action == 'OPEN_LONG' and current_price >= tp_level.price) or \
-                        (signal.action == 'OPEN_SHORT' and current_price <= tp_level.price)
+                         (signal.action == 'OPEN_SHORT' and current_price <= tp_level.price)
 
                 if is_hit:
                     # Calculate close amount
                     close_amount = position.size * tp_level.percentage
-                    
+
                     # Create take profit order
                     order = OrderParams(
                         symbol=symbol,
@@ -2390,20 +2492,20 @@ class ExchangeManager:
 
         except Exception as e:
             logging.error(f"Error checking take profit levels: {e}")
-             
+
     async def get_positions(self, exchange: Optional[str] = None) -> Dict[str, List[PositionInfo]]:
         """Get positions from all or specific exchange"""
         try:
             result = {}
             exchanges = [self.exchanges[exchange]] if exchange else self.exchanges.values()
-            
+
             for ex in exchanges:
                 positions = await ex.get_positions()
                 if positions:
                     result[ex.exchange_name] = positions
-                    
+
             return result
-            
+
         except Exception as e:
             logging.error(f"Error getting positions: {e}")
             return {}
@@ -2430,7 +2532,7 @@ class ExchangeManager:
                 if balance:
                     result[name] = balance
             return result
-            
+
         except Exception as e:
             logging.error(f"Error getting balances: {e}")
             return {}
@@ -2444,7 +2546,7 @@ class ExchangeManager:
                     success=False,
                     error_message=f"Exchange {exchange} not configured"
                 )
-                
+
             # Get position
             positions = await exchange_client.get_positions(symbol)
             if not positions:
@@ -2452,9 +2554,9 @@ class ExchangeManager:
                     success=False,
                     error_message=f"No position found for {symbol}"
                 )
-                
+
             position = positions[0]
-            
+
             # Create close order
             order = OrderParams(
                 symbol=symbol,
@@ -2463,32 +2565,33 @@ class ExchangeManager:
                 amount=position.size,
                 reduce_only=True,
                 leverage=position.leverage,
-                margin_mode=position.margin_mode.value if hasattr(position.margin_mode, 'value') else str(position.margin_mode),
+                margin_mode=position.margin_mode.value if hasattr(position.margin_mode, 'value') else str(
+                    position.margin_mode),
                 extra_params={
                     'posSide': 'long' if position.side == PositionSide.LONG else 'short'
                 }
             )
-            
+
             return await exchange_client.create_order(order)
-            
+
         except Exception as e:
             logging.error(f"Error closing position: {e}")
             return OrderResult(success=False, error_message=str(e))
 
     async def modify_position(self, exchange: str, symbol: str,
-                            stop_loss: Optional[float] = None,
-                            take_profit: Optional[float] = None) -> bool:
+                              stop_loss: Optional[float] = None,
+                              take_profit: Optional[float] = None) -> bool:
         """Modify position stop loss and take profit"""
         try:
             exchange_client = self.exchanges.get(exchange)
             if not exchange_client:
                 return False
-                
+
             # Get position
             positions = await exchange_client.get_positions(symbol)
             if not positions:
                 return False
-                
+
             position = positions[0]
             # OKX: use algo TP/SL update
             if getattr(exchange_client, 'exchange_name', '') == 'OKX':
@@ -2526,7 +2629,7 @@ class ExchangeManager:
                 result = await exchange_client.create_order(order)
                 success = success and result.success
             return success
-            
+
         except Exception as e:
             logging.error(f"Error modifying position: {e}")
             return False
@@ -2537,9 +2640,9 @@ class ExchangeManager:
             exchange_client = self.exchanges.get(exchange)
             if not exchange_client:
                 return []
-                
+
             return await exchange_client.get_leverage_brackets(symbol)
-            
+
         except Exception as e:
             logging.error(f"Error getting leverage brackets: {e}")
             return []
@@ -2557,7 +2660,7 @@ class ExchangeManager:
                 if rates:
                     result[name] = rates
             return result
-            
+
         except Exception as e:
             logging.error(f"Error getting funding rates: {e}")
             return {}
@@ -2570,7 +2673,7 @@ class ExchangeManager:
                 if signal.exchange == exchange:
                     active_symbols.add(signal.symbol)
             return list(active_symbols)
-            
+
         except Exception as e:
             logging.error(f"Error getting active symbols: {e}")
             return []
@@ -2581,9 +2684,9 @@ class ExchangeManager:
             exchange_client = self.exchanges.get(exchange)
             if not exchange_client:
                 return None
-                
+
             return await exchange_client.get_market_info(symbol)
-            
+
         except Exception as e:
             logging.error(f"Error getting market info: {e}")
             return None
@@ -2594,15 +2697,15 @@ class ExchangeManager:
             result = {}
             balances = await self.get_balances()
             positions = await self.get_positions()
-            
+
             for exchange in self.exchanges:
                 balance = balances.get(exchange, AccountBalance())
                 exch_positions = positions.get(exchange, [])
-                
+
                 # Calculate account metrics
                 used_margin = sum(pos.initial_margin for pos in exch_positions)
                 margin_ratio = (used_margin / balance.total * 100) if balance.total > 0 else 0
-                
+
                 # Determine account health status
                 if margin_ratio > 80:
                     health = 'CRITICAL'
@@ -2610,7 +2713,7 @@ class ExchangeManager:
                     health = 'WARNING'
                 else:
                     health = 'HEALTHY'
-                    
+
                 result[exchange] = {
                     'total_equity': balance.total,
                     'used_margin': used_margin,
@@ -2622,9 +2725,9 @@ class ExchangeManager:
                     'total_positions': len(exch_positions),
                     'last_update': datetime.now()
                 }
-                
+
             return result
-            
+
         except Exception as e:
             logging.error(f"Error getting account overview: {e}")
             return {}
@@ -2645,14 +2748,13 @@ class ExchangeManager:
                 'position_value': position_value,
                 'margin_ratio': (position.maintenance_margin / position_value * 100) if position_value > 0 else 0,
                 'leverage_used': position_value / position.initial_margin if position.initial_margin > 0 else 0,
-                'liquidation_distance': (abs(position.entry_price - position.liquidation_price) / position.entry_price * 100) 
-                                      if position.liquidation_price else 0
+                'liquidation_distance': (
+                            abs(position.entry_price - position.liquidation_price) / position.entry_price * 100)
+                if position.liquidation_price else 0
             }
         except Exception as e:
             logging.error(f"Error calculating risk metrics: {e}")
             return {}
-        
-        
 
     async def _check_dynamic_stop_loss(self, exchange_name: str, symbol: str, position: PositionInfo) -> None:
         """Check and update dynamic stop loss"""
@@ -2677,7 +2779,7 @@ class ExchangeManager:
 
             current_price = market_info.last_price
             entry_price = position.entry_price
-            
+
             # Calculate new stop loss
             if signal.action == 'OPEN_LONG':
                 if current_price > entry_price:
@@ -2711,11 +2813,11 @@ class ExchangeManager:
                 try:
                     balance = await exchange.fetch_balance()
                     positions = await exchange.fetch_positions()
-                    
+
                     # Use correct field names
                     used_margin = balance.used_margin
                     margin_ratio = balance.margin_ratio
-                    
+
                     # Determine account health status
                     if margin_ratio > 80:
                         health = 'CRITICAL'
@@ -2723,7 +2825,7 @@ class ExchangeManager:
                         health = 'WARNING'
                     else:
                         health = 'HEALTHY'
-                        
+
                     result[exchange_name] = {
                         'total_equity': balance.total_equity,
                         'used_margin': used_margin,
@@ -2735,18 +2837,18 @@ class ExchangeManager:
                         'total_positions': len(positions),
                         'last_update': datetime.now()
                     }
-                    
+
                 except Exception as e:
                     logging.error(f"Error getting overview for {exchange_name}: {e}")
-                    
+
             return result
-            
+
         except Exception as e:
             logging.error(f"Error getting account overview: {e}")
             return {}
-        
-    async def _execute_take_profit(self, exchange_name: str, symbol: str, 
-                                 position: PositionInfo, tp_level: TakeProfitLevel) -> None:
+
+    async def _execute_take_profit(self, exchange_name: str, symbol: str,
+                                   position: PositionInfo, tp_level: TakeProfitLevel) -> None:
         """Execute take profit order"""
         try:
             exchange = self.exchanges.get(exchange_name)
@@ -2785,22 +2887,22 @@ class ExchangeManager:
                         for position in positions:
                             if position.size == 0:
                                 continue
-                                
+
                             # Check dynamic stop loss
                             await self._check_dynamic_stop_loss(exchange_name, position.symbol, position)
-                            
+
                             # Check take profit targets
                             await self._check_take_profit_levels(exchange_name, position.symbol, position)
-                            
+
                             # Update position stats
                             await self._update_position_stats(exchange_name, position.symbol, position)
-                            
+
                     except Exception as e:
                         logging.error(f"Error monitoring positions for {exchange_name}: {e}")
                         continue
-                        
+
             except Exception as e:
                 logging.error(f"Error in position monitoring: {e}")
-                
+
             await asyncio.sleep(1)
-        
+
